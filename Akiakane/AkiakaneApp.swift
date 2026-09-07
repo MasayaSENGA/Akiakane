@@ -13,5 +13,10 @@ struct AkiakaneApp: App {
         WindowGroup {
             ContentView()
         }
+        .defaultSize(width: 940, height: 600)
+        .commands {
+            // 「新規」は使わないので外す。
+            CommandGroup(replacing: .newItem) { }
+        }
     }
 }
