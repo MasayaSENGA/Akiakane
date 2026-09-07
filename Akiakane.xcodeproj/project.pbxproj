@@ -6,21 +6,59 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXContainerItemProxy section */
+		18D115AE583F71B2E3DE3259 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = CEA7F635304EFAB600442EAA /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = CEA7F63C304EFAB600442EAA;
+			remoteInfo = Akiakane;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		CEA7F63D304EFAB600442EAA /* Akiakane.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Akiakane.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AD4D1EA6F5959F4024B40BD5 /* AkiakaneTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AkiakaneTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		64ED03F2C4B3E27158446572 /* Exceptions for "Akiakane" folder in "Akiakane" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				AkiakaneTests/EncodeArgumentsTests.swift,
+				AkiakaneTests/FFmpegProgressParserTests.swift,
+				AkiakaneTests/TestFixtures.swift,
+			);
+			target = CEA7F63C304EFAB600442EAA /* Akiakane */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		CEA7F63F304EFAB600442EAA /* Akiakane */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				64ED03F2C4B3E27158446572 /* Exceptions for "Akiakane" folder in "Akiakane" target */,
+			);
 			name = Akiakane;
 			path = "";
+			sourceTree = "<group>";
+		};
+		0BF9A5D58E3A38077479D232 /* AkiakaneTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = AkiakaneTests;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		CEA7F63A304EFAB600442EAA /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		76956B29515970584288112B /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -34,6 +72,7 @@
 			isa = PBXGroup;
 			children = (
 				CEA7F63F304EFAB600442EAA /* Akiakane */,
+				0BF9A5D58E3A38077479D232 /* AkiakaneTests */,
 				CEA7F63E304EFAB600442EAA /* Products */,
 			);
 			sourceTree = "<group>";
@@ -42,6 +81,7 @@
 			isa = PBXGroup;
 			children = (
 				CEA7F63D304EFAB600442EAA /* Akiakane.app */,
+				AD4D1EA6F5959F4024B40BD5 /* AkiakaneTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -71,6 +111,29 @@
 			productReference = CEA7F63D304EFAB600442EAA /* Akiakane.app */;
 			productType = "com.apple.product-type.application";
 		};
+		28913883B30EE7E4933A5811 /* AkiakaneTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 9082B3E58F87E75F521B37C3 /* Build configuration list for PBXNativeTarget "AkiakaneTests" */;
+			buildPhases = (
+				105804E7B4EAC0DB856449FB /* Sources */,
+				76956B29515970584288112B /* Frameworks */,
+				CA4A92BE734D0A409A168C64 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				9A7AA15A976A57BCA82D29F7 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				0BF9A5D58E3A38077479D232 /* AkiakaneTests */,
+			);
+			name = AkiakaneTests;
+			packageProductDependencies = (
+			);
+			productName = AkiakaneTests;
+			productReference = AD4D1EA6F5959F4024B40BD5 /* AkiakaneTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -83,6 +146,10 @@
 				TargetAttributes = {
 					CEA7F63C304EFAB600442EAA = {
 						CreatedOnToolsVersion = 26.6;
+					};
+					28913883B30EE7E4933A5811 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = CEA7F63C304EFAB600442EAA;
 					};
 				};
 			};
@@ -101,12 +168,20 @@
 			projectRoot = "";
 			targets = (
 				CEA7F63C304EFAB600442EAA /* Akiakane */,
+				28913883B30EE7E4933A5811 /* AkiakaneTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		CEA7F63B304EFAB600442EAA /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CA4A92BE734D0A409A168C64 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -123,7 +198,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		105804E7B4EAC0DB856449FB /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		9A7AA15A976A57BCA82D29F7 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = CEA7F63C304EFAB600442EAA /* Akiakane */;
+			targetProxy = 18D115AE583F71B2E3DE3259 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		CEA7F646304EFAB700442EAA /* Debug */ = {
@@ -302,6 +392,46 @@
 			};
 			name = Release;
 		};
+		CC1672B8A61B68BC51C68672 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = Nana.AkiakaneTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Akiakane.app/Contents/MacOS/Akiakane";
+			};
+			name = Debug;
+		};
+		9DF3C43369483B89EEE6CBB7 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = Nana.AkiakaneTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Akiakane.app/Contents/MacOS/Akiakane";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -319,6 +449,15 @@
 			buildConfigurations = (
 				CEA7F649304EFAB700442EAA /* Debug */,
 				CEA7F64A304EFAB700442EAA /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		9082B3E58F87E75F521B37C3 /* Build configuration list for PBXNativeTarget "AkiakaneTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				CC1672B8A61B68BC51C68672 /* Debug */,
+				9DF3C43369483B89EEE6CBB7 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

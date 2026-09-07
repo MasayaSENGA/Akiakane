@@ -194,7 +194,10 @@ struct ContentView: View {
     @ViewBuilder
     private var detail: some View {
         if let id = selection, let info = model.items.first(where: { $0.id == id }) {
+            // .id(info.id) を付けないと、ファイルを切り替えても前のファイルの
+            // 変換状態（ConversionModel の @State）が使い回されてしまう。
             MediaInfoDetail(info: info)
+                .id(info.id)
         } else {
             Text(model.items.isEmpty ? "読み込んだファイルの情報がここに出ます。" : "左のリストからファイルを選びます。")
                 .foregroundStyle(.secondary)
@@ -257,6 +260,8 @@ struct MediaInfoDetail: View {
 
     let info: MediaInfo
 
+    @State private var conversion = ConversionModel()
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -308,6 +313,10 @@ struct MediaInfoDetail: View {
                         InfoEntry("データ・不明", "\(info.otherStreamCount) 本")
                     ])
                 }
+
+                Divider()
+
+                ConversionSection(info: info, conversion: conversion)
             }
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -425,6 +434,170 @@ struct Callout: View {
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+// MARK: - 変換
+
+/// 進捗コールバックはプロセスの読み取りスレッドから任意のタイミングで呼ばれる。
+/// `ConversionModel` は `@MainActor` なので、ここで受けて `Task { @MainActor in }` に
+/// 中継してから状態を更新する。
+private final class ConversionProgressRelay: @unchecked Sendable {
+    let onProgress: @MainActor (EncodeProgress) -> Void
+
+    init(onProgress: @escaping @MainActor (EncodeProgress) -> Void) {
+        self.onProgress = onProgress
+    }
+
+    func report(_ progress: EncodeProgress) {
+        Task { @MainActor in
+            onProgress(progress)
+        }
+    }
+}
+
+@Observable
+@MainActor
+final class ConversionModel {
+
+    enum State {
+        case idle
+        case running(EncodeProgress?)
+        case finished(URL)
+        case failed(String)
+    }
+
+    private(set) var state: State = .idle
+    private var task: Task<Void, Never>?
+
+    var isRunning: Bool {
+        if case .running = state { return true }
+        return false
+    }
+
+    func start(input: MediaInfo) {
+        guard !isRunning else { return }
+
+        let output = Self.outputURL(for: input)
+        state = .running(nil)
+
+        let relay = ConversionProgressRelay { [weak self] progress in
+            self?.state = .running(progress)
+        }
+
+        task = Task {
+            let runner = FFmpegRunner()
+            do {
+                try await runner.encode(input: input, output: output, settings: EncodeSettings()) { progress in
+                    relay.report(progress)
+                }
+                state = .finished(output)
+            } catch is CancellationError {
+                state = .idle
+            } catch {
+                state = .failed(Self.describe(error))
+            }
+        }
+    }
+
+    func cancel() {
+        task?.cancel()
+    }
+
+    /// 出力先は当面固定。入力と同じフォルダに `<元の名前>_h265.mp4`。
+    static func outputURL(for input: MediaInfo) -> URL {
+        let baseName = input.url.deletingPathExtension().lastPathComponent
+        return input.url
+            .deletingLastPathComponent()
+            .appendingPathComponent("\(baseName)_h265")
+            .appendingPathExtension("mp4")
+    }
+
+    private static func describe(_ error: Error) -> String {
+        guard let localized = error as? LocalizedError else { return error.localizedDescription }
+        return [localized.errorDescription, localized.recoverySuggestion]
+            .compactMap { $0 }
+            .joined(separator: "\n")
+    }
+}
+
+struct ConversionSection: View {
+
+    let info: MediaInfo
+    var conversion: ConversionModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("変換")
+                .font(.subheadline.weight(.semibold))
+
+            switch conversion.state {
+            case .idle:
+                Button("変換を開始") { conversion.start(input: info) }
+
+            case .running(let progress):
+                progressView(progress)
+                Button("キャンセル") { conversion.cancel() }
+
+            case .finished(let url):
+                Callout(symbol: "checkmark.circle.fill", tint: .green,
+                        text: "変換が完了しました: \(url.lastPathComponent)")
+                Button("もう一度変換する") { conversion.start(input: info) }
+
+            case .failed(let message):
+                Callout(symbol: "xmark.octagon.fill", tint: .red, text: message)
+                Button("再試行") { conversion.start(input: info) }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func progressView(_ progress: EncodeProgress?) -> some View {
+        if let fraction = progress?.fraction {
+            ProgressView(value: fraction)
+        } else {
+            ProgressView()
+        }
+
+        Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 18, verticalSpacing: 4) {
+            GridRow {
+                Text("変換済み").foregroundStyle(.secondary).gridColumnAlignment(.leading)
+                Text(elapsedText(progress))
+            }
+            GridRow {
+                Text("速度").foregroundStyle(.secondary)
+                Text(speedText(progress))
+            }
+            GridRow {
+                Text("推定残り時間").foregroundStyle(.secondary)
+                Text(remainingText(progress))
+            }
+            GridRow {
+                Text("出力サイズ").foregroundStyle(.secondary)
+                Text(outputSizeText(progress))
+            }
+        }
+        .font(.callout)
+    }
+
+    private func elapsedText(_ progress: EncodeProgress?) -> String {
+        let completed = MediaInfo.formatDuration(progress?.completed ?? 0)
+        return "\(completed) / \(info.durationText)"
+    }
+
+    private func speedText(_ progress: EncodeProgress?) -> String {
+        guard let speed = progress?.speed else { return "計測中" }
+        return String(format: "%.2fx", speed)
+    }
+
+    private func remainingText(_ progress: EncodeProgress?) -> String {
+        guard let remaining = progress?.estimatedRemaining else { return "不明" }
+        return MediaInfo.formatDuration(remaining)
+    }
+
+    private func outputSizeText(_ progress: EncodeProgress?) -> String {
+        guard let size = progress?.outputSize else { return "不明" }
+        return ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
     }
 }
 
