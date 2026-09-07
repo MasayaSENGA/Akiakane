@@ -13,7 +13,8 @@
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		CEA7F63F304EFAB600442EAA /* Akiakane */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = Akiakane;
+			name = Akiakane;
+			path = "";
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */

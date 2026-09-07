@@ -1,0 +1,26 @@
+# Claude Code / 作業用ドキュメント（個人メモ、コミット対象外）
+CLAUDE.md
+PROMPT-step4.md
+
+# macOS
+.DS_Store
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+DerivedData/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# CocoaPods / Carthage（未使用でも将来の混入対策）
+Pods/
+Carthage/Build/
