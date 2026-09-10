@@ -33,7 +33,18 @@ final class EncodeArgumentsTests: XCTestCase {
         XCTAssertTrue(args.containsConsecutive(["-tag:v", "hvc1"]))
         XCTAssertTrue(args.containsConsecutive(["-movflags", "+faststart"]))
         XCTAssertTrue(args.containsConsecutive(["-progress", "pipe:1", "-nostats", "-loglevel", "error"]))
+        XCTAssertTrue(args.containsConsecutive(["-f", "mp4"]), "出力は .partial 名なので、コンテナ形式を -f で明示する")
         XCTAssertEqual(args.last, output.path)
+    }
+
+    func testContainerFormatIsAlwaysExplicit() {
+        let info = TestFixtures.mediaInfo(url: input, fieldOrder: "progressive")
+        for (container, expected) in [(Container.mp4, "mp4"), (.mkv, "matroska"), (.mov, "mov")] {
+            var settings = EncodeSettings()
+            settings.container = container
+            let args = makeArguments(input: info, output: output, settings: settings)
+            XCTAssertTrue(args.containsConsecutive(["-f", expected]), "\(container) の -f が \(expected) でない")
+        }
     }
 
     // MARK: - インターレース解除
@@ -120,4 +131,38 @@ private extension Array where Element: Equatable {
 
 private func XCTAssertLess<T: Comparable>(_ a: T, _ b: T, file: StaticString = #filePath, line: UInt = #line) {
     XCTAssertTrue(a < b, "\(a) が \(b) より前にありません", file: file, line: line)
+}
+
+// MARK: - VideoToolbox
+
+final class VideoToolboxArgumentsTests: XCTestCase {
+
+    func testVideoToolboxUsesQualityScaleNotCRF() {
+        let input = URL(fileURLWithPath: "/tmp/rec.ts")
+        let info = TestFixtures.mediaInfo(url: input, fieldOrder: "progressive")
+        var settings = EncodeSettings()
+        settings.videoCodec = .hevcVideoToolbox
+        settings.videoToolboxQuality = 70
+        let args = makeArguments(input: info, output: URL(fileURLWithPath: "/tmp/out.mp4.partial"), settings: settings)
+
+        guard let codecIndex = args.firstIndex(of: "-c:v") else { return XCTFail("-c:v がない") }
+        XCTAssertEqual(args[codecIndex + 1], "hevc_videotoolbox")
+        guard let qualityIndex = args.firstIndex(of: "-q:v") else { return XCTFail("-q:v がない") }
+        XCTAssertEqual(args[qualityIndex + 1], "70")
+        XCTAssertFalse(args.contains("-crf"), "VideoToolbox に -crf は渡さない")
+        XCTAssertFalse(args.contains("-preset"), "VideoToolbox に x265 のプリセットは渡さない")
+        guard let tagIndex = args.firstIndex(of: "-tag:v") else { return XCTFail("-tag:v がない") }
+        XCTAssertEqual(args[tagIndex + 1], "hvc1")
+    }
+
+    func testCopyCodecSkipsDeinterlaceAndTag() {
+        let input = URL(fileURLWithPath: "/tmp/rec.ts")
+        let info = TestFixtures.mediaInfo(url: input, fieldOrder: "tt")
+        var settings = EncodeSettings()
+        settings.videoCodec = .copy
+        let args = makeArguments(input: info, output: URL(fileURLWithPath: "/tmp/out.mp4.partial"), settings: settings)
+
+        XCTAssertFalse(args.contains("-vf"), "コピー時はフィルタを掛けられない")
+        XCTAssertFalse(args.contains("-tag:v"), "H.264 のままなので hvc1 タグは付けない")
+    }
 }

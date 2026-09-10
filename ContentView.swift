@@ -1,114 +1,31 @@
 import SwiftUI
+import AppKit
 import UniformTypeIdentifiers
-
-// MARK: - モデル
-
-@Observable
-final class MediaLibraryModel {
-
-    enum ToolStatus {
-        case ready(URL)
-        case missing
-    }
-
-    private(set) var items: [MediaInfo] = []
-    private(set) var isLoading = false
-    private(set) var loadingFileName: String?
-    private(set) var errorMessages: [String] = []
-    private(set) var toolStatus: ToolStatus
-
-    private let runner = FFProbeRunner()
-
-    init() {
-        toolStatus = FFToolLocator.locate(.ffprobe).map { .ready($0) } ?? .missing
-    }
-
-    @MainActor
-    func recheckTools() {
-        toolStatus = FFToolLocator.locate(.ffprobe).map { .ready($0) } ?? .missing
-    }
-
-    @MainActor
-    func add(urls: [URL]) {
-        let files = MediaFileScanner.expand(urls)
-        guard !files.isEmpty else {
-            errorMessages.append("読み込めるファイルがありませんでした。対応している拡張子は \(MediaFileScanner.supportedExtensions.sorted().joined(separator: ", ")) です。")
-            return
-        }
-        Task { await load(files) }
-    }
-
-    @MainActor
-    func clear() {
-        items.removeAll()
-        errorMessages.removeAll()
-    }
-
-    @MainActor
-    func dismissErrors() {
-        errorMessages.removeAll()
-    }
-
-    /// ffprobe は 1 本ずつ順に実行する。数十本まとめてドロップされても
-    /// プロセスが一気に増えないようにするため。
-    @MainActor
-    private func load(_ files: [URL]) async {
-        isLoading = true
-        defer {
-            isLoading = false
-            loadingFileName = nil
-        }
-
-        for file in files {
-            let alreadyLoaded = items.contains {
-                $0.url.standardizedFileURL == file.standardizedFileURL
-            }
-            if alreadyLoaded { continue }
-
-            loadingFileName = file.lastPathComponent
-            do {
-                // probe 自体は別スレッドで動き、ここに戻ってきた時点で main に戻る。
-                let info = try await runner.probe(file)
-                items.append(info)
-            } catch {
-                errorMessages.append(Self.describe(error))
-            }
-        }
-    }
-
-    private static func describe(_ error: Error) -> String {
-        guard let localized = error as? LocalizedError else { return error.localizedDescription }
-        return [localized.errorDescription, localized.recoverySuggestion]
-            .compactMap { $0 }
-            .joined(separator: "\n")
-    }
-}
 
 // MARK: - メイン画面
 
 struct ContentView: View {
 
-    @State private var model = MediaLibraryModel()
+    @Environment(ConversionQueue.self) private var queue
     @State private var selection: MediaInfo.ID?
     @State private var isDropTargeted = false
     @State private var isImporterPresented = false
+    @State private var isInspectorPresented = true
 
     var body: some View {
         NavigationSplitView {
             sidebar
-                .navigationSplitViewColumnWidth(min: 220, ideal: 260)
+                .navigationSplitViewColumnWidth(min: 240, ideal: 300)
         } detail: {
             detail
         }
-        .toolbar {
-            ToolbarItemGroup {
-                Button("ファイルを追加") { isImporterPresented = true }
-                Button("すべて消去") { model.clear(); selection = nil }
-                    .disabled(model.items.isEmpty)
-            }
+        .inspector(isPresented: $isInspectorPresented) {
+            SettingsInspector(queue: queue)
+                .inspectorColumnWidth(min: 300, ideal: 340)
         }
+        .toolbar { toolbarContent }
         .dropDestination(for: URL.self) { urls, _ in
-            model.add(urls: urls)
+            queue.add(urls: urls)
             return true
         } isTargeted: { targeted in
             isDropTargeted = targeted
@@ -121,43 +38,134 @@ struct ContentView: View {
             }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
-            if case .missing = model.toolStatus { toolMissingBanner }
+            if case .missing(let tools) = queue.toolStatus { toolMissingBanner(tools) }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            if !model.errorMessages.isEmpty { errorBanner }
+            if !queue.errorMessages.isEmpty { errorBanner }
         }
         .fileImporter(
             isPresented: $isImporterPresented,
             allowedContentTypes: Self.allowedContentTypes,
             allowsMultipleSelection: true
         ) { result in
-            if case .success(let urls) = result { model.add(urls: urls) }
+            if case .success(let urls) = result { queue.add(urls: urls) }
         }
+        .onDeleteCommand {
+            guard let selection else { return }
+            queue.remove(selection)
+            self.selection = nil
+        }
+    }
+
+    // MARK: ツールバー
+
+    @ToolbarContentBuilder
+    private var toolbarContent: some ToolbarContent {
+        ToolbarItemGroup(placement: .navigation) {
+            Button {
+                isImporterPresented = true
+            } label: {
+                Label("ファイルを追加", systemImage: "plus")
+            }
+            .help("変換するファイルやフォルダを追加する")
+        }
+
+        ToolbarItemGroup {
+            if queue.isRunning {
+                Button {
+                    queue.stopAll()
+                } label: {
+                    Label("停止", systemImage: "stop.fill")
+                }
+                .help("変換中のファイルを止める。残りは待機のまま残る")
+            } else {
+                Button {
+                    queue.startAll()
+                } label: {
+                    Label("変換を開始", systemImage: "play.fill")
+                }
+                .disabled(queue.waitingCount == 0 || queue.toolStatus != .ready)
+                .help("待機中のファイルを上から順に変換する")
+            }
+
+            Menu {
+                Button("完了したものを消去") { queue.removeSettled(); clearSelectionIfMissing() }
+                    .disabled(!queue.hasSettledItems)
+                Button("すべて消去") { queue.removeAll(); clearSelectionIfMissing() }
+                    .disabled(queue.items.isEmpty)
+            } label: {
+                Label("消去", systemImage: "trash")
+            }
+            .help("リストからファイルを外す。ファイル自体は消えない")
+
+            Button {
+                isInspectorPresented.toggle()
+            } label: {
+                Label("設定", systemImage: "slider.horizontal.3")
+            }
+            .help("変換設定と出力先の設定パネルを表示する")
+        }
+    }
+
+    private func clearSelectionIfMissing() {
+        if queue.item(for: selection) == nil { selection = nil }
     }
 
     // MARK: サイドバー
 
     private var sidebar: some View {
         Group {
-            if model.items.isEmpty {
+            if queue.items.isEmpty {
                 emptyState
             } else {
-                List(model.items, selection: $selection) { info in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(info.fileName)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Text(info.durationText)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.vertical, 2)
+                List(queue.items, selection: $selection) { item in
+                    QueueRow(item: item)
+                        .contextMenu { contextMenu(for: item) }
+                }
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    queueSummary
                 }
             }
         }
         .overlay(alignment: .bottom) {
-            if model.isLoading { loadingIndicator }
+            if queue.isProbing { probingIndicator }
         }
+    }
+
+    @ViewBuilder
+    private func contextMenu(for item: ConversionQueue.Item) -> some View {
+        switch item.status {
+        case .waiting:
+            Button("このファイルを外す") { queue.cancel(item.id) }
+        case .running:
+            Button("変換をキャンセル") { queue.cancel(item.id) }
+        case .finished(let url):
+            Button("Finder で表示") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+            Button("もう一度変換する") { queue.requeue(item.id) }
+        case .skipped, .failed, .cancelled:
+            Button("待機に戻す") { queue.requeue(item.id) }
+        }
+        Divider()
+        Button("元のファイルを Finder で表示") { NSWorkspace.shared.activateFileViewerSelecting([item.info.url]) }
+        Button("リストから外す") {
+            queue.remove(item.id)
+            if selection == item.id { selection = nil }
+        }
+    }
+
+    private var queueSummary: some View {
+        HStack(spacing: 12) {
+            Text("\(queue.items.count) 件")
+            if queue.waitingCount > 0 { Text("待機 \(queue.waitingCount)") }
+            if queue.finishedCount > 0 { Text("完了 \(queue.finishedCount)") }
+            if queue.failedCount > 0 { Text("失敗 \(queue.failedCount)").foregroundStyle(.red) }
+            Spacer()
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.bar)
     }
 
     private var emptyState: some View {
@@ -176,10 +184,10 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var loadingIndicator: some View {
+    private var probingIndicator: some View {
         HStack(spacing: 8) {
             ProgressView().controlSize(.small)
-            Text(model.loadingFileName ?? "解析しています")
+            Text(queue.probingFileName ?? "解析しています")
                 .font(.caption)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -187,19 +195,18 @@ struct ContentView: View {
         .padding(8)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
         .padding(8)
+        .padding(.bottom, 24)
     }
 
     // MARK: 詳細
 
     @ViewBuilder
     private var detail: some View {
-        if let id = selection, let info = model.items.first(where: { $0.id == id }) {
-            // .id(info.id) を付けないと、ファイルを切り替えても前のファイルの
-            // 変換状態（ConversionModel の @State）が使い回されてしまう。
-            MediaInfoDetail(info: info)
-                .id(info.id)
+        if let item = queue.item(for: selection) {
+            MediaInfoDetail(item: item, queue: queue)
+                .id(item.id)
         } else {
-            Text(model.items.isEmpty ? "読み込んだファイルの情報がここに出ます。" : "左のリストからファイルを選びます。")
+            Text(queue.items.isEmpty ? "読み込んだファイルの情報がここに出ます。" : "左のリストからファイルを選びます。")
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -207,19 +214,20 @@ struct ContentView: View {
 
     // MARK: バナー
 
-    private var toolMissingBanner: some View {
-        HStack(spacing: 10) {
+    private func toolMissingBanner(_ tools: [FFTool]) -> some View {
+        let names = tools.map(\.rawValue).joined(separator: " と ")
+        return HStack(spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
             VStack(alignment: .leading, spacing: 2) {
-                Text("ffprobe が見つかりません")
+                Text("\(names) が見つかりません")
                     .font(.callout.weight(.medium))
-                Text("ターミナルで brew install ffmpeg を実行してから、再確認を押します。")
+                Text("ターミナルで brew install ffmpeg を実行してから「再確認」を押す。別の場所にある場合は、設定（⌘,）でパスを指定する。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button("再確認") { model.recheckTools() }
+            Button("再確認") { queue.recheckTools() }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -231,14 +239,14 @@ struct ContentView: View {
             Image(systemName: "xmark.octagon.fill")
                 .foregroundStyle(.red)
             VStack(alignment: .leading, spacing: 4) {
-                ForEach(Array(model.errorMessages.enumerated()), id: \.offset) { _, message in
+                ForEach(Array(queue.errorMessages.enumerated()), id: \.offset) { _, message in
                     Text(message)
                         .font(.caption)
                         .textSelection(.enabled)
                 }
             }
             Spacer()
-            Button("閉じる") { model.dismissErrors() }
+            Button("閉じる") { queue.dismissErrors() }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -254,353 +262,73 @@ struct ContentView: View {
     }()
 }
 
-// MARK: - 詳細表示
+// MARK: - キューの1行
 
-struct MediaInfoDetail: View {
+struct QueueRow: View {
 
-    let info: MediaInfo
-
-    @State private var conversion = ConversionModel()
+    let item: ConversionQueue.Item
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+        HStack(spacing: 10) {
+            Image(systemName: item.status.symbolName)
+                .foregroundStyle(tint)
+                .frame(width: 16)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(info.fileName)
-                        .font(.title3.weight(.semibold))
-                        .textSelection(.enabled)
-                    Text(info.url.deletingLastPathComponent().path)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.info.fileName)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
 
-                InfoSection(title: "ファイル", entries: [
-                    InfoEntry("コンテナ", info.containerName),
-                    InfoEntry("長さ", info.durationText),
-                    InfoEntry("サイズ", info.fileSizeText),
-                    InfoEntry("全体ビットレート", info.bitRateText)
-                ])
-
-                if !info.hasReliableDuration {
-                    Callout(
-                        symbol: "exclamationmark.triangle",
-                        tint: .orange,
-                        text: "長さを取得できませんでした。このファイルは変換時に進捗率を計算できません。"
-                    )
-                }
-
-                ForEach(Array(info.videoStreams.enumerated()), id: \.element.id) { index, video in
-                    InfoSection(
-                        title: info.videoStreams.count > 1 ? "映像 \(index + 1)（stream \(video.index)）" : "映像（stream \(video.index)）",
-                        entries: videoEntries(video)
-                    )
-                }
-
-                deinterlaceCallout
-
-                ForEach(Array(info.audioStreams.enumerated()), id: \.element.id) { index, audio in
-                    InfoSection(
-                        title: info.audioStreams.count > 1 ? "音声 \(index + 1)（stream \(audio.index)）" : "音声（stream \(audio.index)）",
-                        entries: audioEntries(audio)
-                    )
-                }
-
-                if info.subtitleStreamCount > 0 || info.otherStreamCount > 0 {
-                    InfoSection(title: "その他のストリーム", entries: [
-                        InfoEntry("字幕", "\(info.subtitleStreamCount) 本"),
-                        InfoEntry("データ・不明", "\(info.otherStreamCount) 本")
-                    ])
-                }
-
-                Divider()
-
-                ConversionSection(info: info, conversion: conversion)
-            }
-            .padding(24)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    @ViewBuilder
-    private var deinterlaceCallout: some View {
-        switch info.deinterlaceAdvice {
-        case .notNeeded:
-            Callout(symbol: "checkmark.circle", tint: .secondary,
-                    text: "プログレッシブ素材です。インターレース解除は不要です。")
-        case .recommended(let order):
-            Callout(symbol: "square.stack.3d.down.right", tint: .blue,
-                    text: "\(order.displayName)です。H.265 はインターレースを扱えないため、bwdif での解除が必要になります。")
-        case .undetermined:
-            Callout(symbol: "exclamationmark.triangle", tint: .orange,
-                    text: "field_order を取得できませんでした。この素材はインターレース解除をプリセット任せにできません。")
-        }
-    }
-
-    private func videoEntries(_ video: VideoStreamInfo) -> [InfoEntry] {
-        var entries: [InfoEntry] = [
-            InfoEntry("コーデック", video.codecLongName ?? video.codecName),
-            InfoEntry("解像度", video.resolutionText)
-        ]
-        if let frameRate = video.frameRate {
-            entries.append(InfoEntry("フレームレート", String(format: "%.3f fps", frameRate)))
-        }
-        entries.append(InfoEntry("フィールドオーダー", video.fieldOrder.displayName))
-        if let pixelFormat = video.pixelFormat {
-            entries.append(InfoEntry("ピクセルフォーマット", pixelFormat))
-        }
-        if let bitDepth = video.bitDepth {
-            entries.append(InfoEntry("ビット深度", "\(bitDepth) bit"))
-        }
-        if let sar = video.sampleAspectRatio {
-            entries.append(InfoEntry("SAR", video.isAnamorphic ? "\(sar)（アナモルフィック）" : sar))
-        }
-        if let dar = video.displayAspectRatio {
-            entries.append(InfoEntry("DAR", dar))
-        }
-        if let bitRate = video.bitRate {
-            entries.append(InfoEntry("ビットレート", String(format: "%.1f Mbps", Double(bitRate) / 1_000_000)))
-        }
-        return entries
-    }
-
-    private func audioEntries(_ audio: AudioStreamInfo) -> [InfoEntry] {
-        var entries: [InfoEntry] = [
-            InfoEntry("コーデック", audio.codecName),
-            InfoEntry("チャンネル", audio.channelText)
-        ]
-        if let sampleRate = audio.sampleRate {
-            entries.append(InfoEntry("サンプルレート", "\(sampleRate) Hz"))
-        }
-        if let bitRate = audio.bitRate {
-            entries.append(InfoEntry("ビットレート", "\(bitRate / 1000) kbps"))
-        }
-        if let language = audio.language {
-            entries.append(InfoEntry("言語", language))
-        }
-        return entries
-    }
-}
-
-// MARK: - 部品
-
-struct InfoEntry: Identifiable {
-    let label: String
-    let value: String
-    var id: String { label }
-
-    init(_ label: String, _ value: String) {
-        self.label = label
-        self.value = value
-    }
-}
-
-struct InfoSection: View {
-    let title: String
-    let entries: [InfoEntry]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.subheadline.weight(.semibold))
-            Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 18, verticalSpacing: 4) {
-                ForEach(entries) { entry in
-                    GridRow {
-                        Text(entry.label)
-                            .foregroundStyle(.secondary)
-                            .gridColumnAlignment(.leading)
-                        Text(entry.value)
-                            .textSelection(.enabled)
+                if case .running(let progress) = item.status {
+                    if let fraction = progress?.fraction {
+                        ProgressView(value: fraction)
+                            .controlSize(.small)
+                    } else {
+                        ProgressView()
+                            .controlSize(.small)
                     }
                 }
-            }
-            .font(.callout)
-        }
-    }
-}
 
-struct Callout: View {
-    let symbol: String
-    let tint: Color
-    let text: String
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: symbol).foregroundStyle(tint)
-            Text(text)
-        }
-        .font(.callout)
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
-    }
-}
-
-// MARK: - 変換
-
-/// 進捗コールバックはプロセスの読み取りスレッドから任意のタイミングで呼ばれる。
-/// `ConversionModel` は `@MainActor` なので、ここで受けて `Task { @MainActor in }` に
-/// 中継してから状態を更新する。
-private final class ConversionProgressRelay: @unchecked Sendable {
-    let onProgress: @MainActor (EncodeProgress) -> Void
-
-    init(onProgress: @escaping @MainActor (EncodeProgress) -> Void) {
-        self.onProgress = onProgress
-    }
-
-    func report(_ progress: EncodeProgress) {
-        Task { @MainActor in
-            onProgress(progress)
-        }
-    }
-}
-
-@Observable
-@MainActor
-final class ConversionModel {
-
-    enum State {
-        case idle
-        case running(EncodeProgress?)
-        case finished(URL)
-        case failed(String)
-    }
-
-    private(set) var state: State = .idle
-    private var task: Task<Void, Never>?
-
-    var isRunning: Bool {
-        if case .running = state { return true }
-        return false
-    }
-
-    func start(input: MediaInfo) {
-        guard !isRunning else { return }
-
-        let output = Self.outputURL(for: input)
-        state = .running(nil)
-
-        let relay = ConversionProgressRelay { [weak self] progress in
-            self?.state = .running(progress)
-        }
-
-        task = Task {
-            let runner = FFmpegRunner()
-            do {
-                try await runner.encode(input: input, output: output, settings: EncodeSettings()) { progress in
-                    relay.report(progress)
-                }
-                state = .finished(output)
-            } catch is CancellationError {
-                state = .idle
-            } catch {
-                state = .failed(Self.describe(error))
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
         }
+        .padding(.vertical, 2)
     }
 
-    func cancel() {
-        task?.cancel()
-    }
-
-    /// 出力先は当面固定。入力と同じフォルダに `<元の名前>_h265.mp4`。
-    static func outputURL(for input: MediaInfo) -> URL {
-        let baseName = input.url.deletingPathExtension().lastPathComponent
-        return input.url
-            .deletingLastPathComponent()
-            .appendingPathComponent("\(baseName)_h265")
-            .appendingPathExtension("mp4")
-    }
-
-    private static func describe(_ error: Error) -> String {
-        guard let localized = error as? LocalizedError else { return error.localizedDescription }
-        return [localized.errorDescription, localized.recoverySuggestion]
-            .compactMap { $0 }
-            .joined(separator: "\n")
-    }
-}
-
-struct ConversionSection: View {
-
-    let info: MediaInfo
-    var conversion: ConversionModel
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("変換")
-                .font(.subheadline.weight(.semibold))
-
-            switch conversion.state {
-            case .idle:
-                Button("変換を開始") { conversion.start(input: info) }
-
-            case .running(let progress):
-                progressView(progress)
-                Button("キャンセル") { conversion.cancel() }
-
-            case .finished(let url):
-                Callout(symbol: "checkmark.circle.fill", tint: .green,
-                        text: "変換が完了しました: \(url.lastPathComponent)")
-                Button("もう一度変換する") { conversion.start(input: info) }
-
-            case .failed(let message):
-                Callout(symbol: "xmark.octagon.fill", tint: .red, text: message)
-                Button("再試行") { conversion.start(input: info) }
-            }
+    private var subtitle: String {
+        switch item.status {
+        case .waiting:
+            return "\(item.info.durationText) · \(item.info.fileSizeText)"
+        case .running(let progress):
+            var parts = [item.status.shortText]
+            if let speed = progress?.speed { parts.append(String(format: "%.2fx", speed)) }
+            if let remaining = progress?.estimatedRemaining { parts.append("残り \(MediaInfo.formatDuration(remaining))") }
+            return parts.joined(separator: " · ")
+        case .finished(let url):
+            let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64)
+                .map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }
+            return ["完了", size].compactMap { $0 }.joined(separator: " · ")
+        case .skipped, .failed, .cancelled:
+            return item.status.shortText
         }
     }
 
-    @ViewBuilder
-    private func progressView(_ progress: EncodeProgress?) -> some View {
-        if let fraction = progress?.fraction {
-            ProgressView(value: fraction)
-        } else {
-            ProgressView()
+    private var tint: Color {
+        switch item.status {
+        case .waiting:   return .secondary
+        case .running:   return .accentColor
+        case .finished:  return .green
+        case .skipped:   return .secondary
+        case .failed:    return .red
+        case .cancelled: return .secondary
         }
-
-        Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 18, verticalSpacing: 4) {
-            GridRow {
-                Text("変換済み").foregroundStyle(.secondary).gridColumnAlignment(.leading)
-                Text(elapsedText(progress))
-            }
-            GridRow {
-                Text("速度").foregroundStyle(.secondary)
-                Text(speedText(progress))
-            }
-            GridRow {
-                Text("推定残り時間").foregroundStyle(.secondary)
-                Text(remainingText(progress))
-            }
-            GridRow {
-                Text("出力サイズ").foregroundStyle(.secondary)
-                Text(outputSizeText(progress))
-            }
-        }
-        .font(.callout)
-    }
-
-    private func elapsedText(_ progress: EncodeProgress?) -> String {
-        let completed = MediaInfo.formatDuration(progress?.completed ?? 0)
-        return "\(completed) / \(info.durationText)"
-    }
-
-    private func speedText(_ progress: EncodeProgress?) -> String {
-        guard let speed = progress?.speed else { return "計測中" }
-        return String(format: "%.2fx", speed)
-    }
-
-    private func remainingText(_ progress: EncodeProgress?) -> String {
-        guard let remaining = progress?.estimatedRemaining else { return "不明" }
-        return MediaInfo.formatDuration(remaining)
-    }
-
-    private func outputSizeText(_ progress: EncodeProgress?) -> String {
-        guard let size = progress?.outputSize else { return "不明" }
-        return ByteCountFormatter.string(fromByteCount: size, countStyle: .file)
     }
 }
 
 #Preview {
     ContentView()
+        .environment(ConversionQueue())
 }

@@ -27,6 +27,8 @@
 			membershipExceptions = (
 				AkiakaneTests/EncodeArgumentsTests.swift,
 				AkiakaneTests/FFmpegProgressParserTests.swift,
+				AkiakaneTests/OutputPlanTests.swift,
+				AkiakaneTests/SettingsPersistenceTests.swift,
 				AkiakaneTests/TestFixtures.swift,
 			);
 			target = CEA7F63C304EFAB600442EAA /* Akiakane */;

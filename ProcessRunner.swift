@@ -33,7 +33,8 @@ enum ProcessRunnerError: LocalizedError {
 
 /// 標準出力のチャンクを行単位に分割する箱。
 /// チャンクの途中で行が切れることがあるため、改行が来るまでバッファに溜める。
-private final class LineSplitter: @unchecked Sendable {
+/// 読み取りスレッドから呼ばれるため、既定の MainActor 分離から外す。
+nonisolated private final class LineSplitter: @unchecked Sendable {
     private let lock = NSLock()
     private var buffer = Data()
     private let onLine: @Sendable (String) -> Void
@@ -74,7 +75,8 @@ private final class LineSplitter: @unchecked Sendable {
 }
 
 /// 標準出力・標準エラーをスレッドセーフに溜める箱。
-private final class OutputCollector: @unchecked Sendable {
+/// 読み取りスレッドから呼ばれるため、既定の MainActor 分離から外す。
+nonisolated private final class OutputCollector: @unchecked Sendable {
     private let lock = NSLock()
     private var out = Data()
     private var err = Data()

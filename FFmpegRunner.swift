@@ -15,7 +15,7 @@ struct EncodeProgress: Sendable, Equatable {
 /// 混乱を避けて `out_time_us` だけを使い、無ければ `out_time`（HH:MM:SS.mmm）に
 /// フォールバックする。副作用を持たない純粋関数にしてあるので、実際の ffmpeg を
 /// 起動せず、`-progress` 出力を文字列リテラルとして与えるだけでテストできる。
-enum FFmpegProgressParser {
+nonisolated enum FFmpegProgressParser {
 
     /// `progress=continue` または `progress=end` で終わる1ブロック分の行を渡す。
     static func parseBlock(
@@ -90,7 +90,7 @@ enum FFmpegProgressParser {
 /// `-progress` の出力を1行ずつ受け取り、ブロックが完結するたびに `EncodeProgress` を作る。
 /// `ProcessRunner.runStreaming` のコールバックは任意のスレッドから呼ばれるため、
 /// 内部状態はロックで保護する。
-final class FFmpegProgressAccumulator: @unchecked Sendable {
+nonisolated final class FFmpegProgressAccumulator: @unchecked Sendable {
     private let lock = NSLock()
     private var pendingLines: [String] = []
     private let duration: TimeInterval?
