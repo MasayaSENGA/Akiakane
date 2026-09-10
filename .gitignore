@@ -10,6 +10,7 @@ xcuserdata/
 *.xcscmblueprint
 *.xccheckout
 DerivedData/
+build/
 *.moved-aside
 *.hmap
 *.ipa

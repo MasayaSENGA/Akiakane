@@ -79,6 +79,18 @@ xcodebuild -project Akiakane.xcodeproj -scheme Akiakane -configuration Debug tes
 
 ユニットテストは ffmpeg を起動せず、引数の組み立て、`-progress` 出力のパース、出力先の命名、設定の保存を検証する。
 
+### 自分用の .app を作る
+
+Release 構成でビルドして `/Applications` に置く。署名はアドホック（Sign to Run Locally 相当）なので、ビルドした Mac ではそのまま起動できる。
+
+```bash
+xcodebuild -project Akiakane.xcodeproj -scheme Akiakane -configuration Release -derivedDataPath build build
+ditto build/Build/Products/Release/Akiakane.app /Applications/Akiakane.app
+```
+
+コードを更新したら同じコマンドで上書きする。`build/` は `.gitignore` で除外している。
+別の Mac にコピーした場合は未署名扱いになるため、初回は「システム設定 → プライバシーとセキュリティ → このまま開く」が必要になる。
+
 テスト用のインターレース素材は次のコマンドで作れる。
 
 ```bash
@@ -103,6 +115,7 @@ ffmpeg -f lavfi -i testsrc2=size=1440x1080:rate=30000/1001 -f lavfi -i sine=freq
 | `FFProbeReport.swift` / `MediaInfo.swift` | ffprobe の JSON とドメインモデル |
 | `ProcessRunner.swift` | 外部プロセスの async 実行基盤 |
 | `FFToolLocator.swift` | ffmpeg / ffprobe のパス解決 |
+| `Scripts/DrawIcon.swift` | アプリアイコンを CoreGraphics で描くスクリプト。アプリには含まれない |
 
 プロジェクトをゼロから作り直す場合の Xcode 設定手順は `SETUP.md` にある。開発時の前提や設計上の決定は `CLAUDE.md` にまとめている。
 

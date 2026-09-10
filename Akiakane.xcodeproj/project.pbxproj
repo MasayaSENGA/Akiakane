@@ -31,6 +31,7 @@
 				AkiakaneTests/OutputPlanTests.swift,
 				AkiakaneTests/SettingsPersistenceTests.swift,
 				AkiakaneTests/TestFixtures.swift,
+				Scripts/DrawIcon.swift,
 			);
 			target = CEA7F63C304EFAB600442EAA /* Akiakane */;
 		};
