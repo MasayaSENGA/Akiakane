@@ -1,5 +1,8 @@
 # セットアップ手順（ステップ2〜3）
 
+リポジトリを clone して使うだけなら、この手順は不要。`README.md` の「インストール」を参照。
+以下は、Xcode プロジェクトをゼロから作り直す場合の記録。
+
 ## 1. ffmpeg / ffprobe の用意
 
 ```bash
@@ -27,7 +30,7 @@ which ffprobe   # /opt/homebrew/bin/ffprobe が返れば OK
 1. プロジェクトナビゲータでプロジェクト名 → TARGETS の `Akiakane` を選択
 2. **Signing & Capabilities** タブ
 3. **App Sandbox** の右上にある「×」または「-」ボタンで capability ごと削除
-4. Hardened Runtime も付いていれば削除してよい（自分専用なので不要）
+4. Hardened Runtime も付いていれば削除してよい（署名・公証はしないので不要）
 
 削除後、`Akiakane.entitlements` に `com.apple.security.app-sandbox` が残っていないことを確認してください。
 

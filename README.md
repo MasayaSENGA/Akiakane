@@ -2,7 +2,9 @@
 
 macOS 用の動画一括変換アプリ。放送録画由来の `.ts` / `.m2ts` や既存の H.264 ファイルを、ffmpeg を使って H.265 に変換する。
 
-作者専用のツールで、配布はしない。変換処理は ffmpeg に委譲し、このアプリは **フロントエンドとキュー管理** に徹する。独自のエンコード実装や編集機能は持たない。
+もとは作者が自分の録画を整理するために作ったもので、ソースコードのみを公開している。変換処理は ffmpeg に委譲し、このアプリは **フロントエンドとキュー管理** に徹する。独自のエンコード実装や編集機能は持たない。
+
+ビルド済みのアプリは配布していない。使うには clone して Xcode でビルドする。動作の保証やサポートは行わないが、Issue や Pull Request は歓迎する。
 
 ## 動作環境
 
@@ -10,7 +12,19 @@ macOS 用の動画一括変換アプリ。放送録画由来の `.ts` / `.m2ts` 
 - Homebrew の ffmpeg / ffprobe（`brew install ffmpeg`）
 - Xcode 26 以降（ビルド用）
 
-App Sandbox は無効にしてある。有効にすると `Process` から ffmpeg を起動できなくなる。
+App Sandbox は無効にしてある。有効にすると `Process` から ffmpeg を起動できなくなる。コード署名と公証もしていないため、App Store には出せない。
+
+## インストール
+
+```bash
+brew install ffmpeg
+git clone https://github.com/MasayaSENGA/Akiakane.git
+cd Akiakane
+open Akiakane.xcodeproj
+```
+
+Xcode で `Akiakane` スキームを選んで Run する。Signing はローカルの「Sign to Run Locally」のままでよい。
+初回起動時に ffmpeg が見つからないと表示されたら、⌘, の設定ウインドウで実行ファイルのパスを指定する。
 
 ## できること
 
@@ -90,12 +104,18 @@ ffmpeg -f lavfi -i testsrc2=size=1440x1080:rate=30000/1001 -f lavfi -i sine=freq
 | `ProcessRunner.swift` | 外部プロセスの async 実行基盤 |
 | `FFToolLocator.swift` | ffmpeg / ffprobe のパス解決 |
 
-初期セットアップの手順は `SETUP.md` を参照。
+プロジェクトをゼロから作り直す場合の Xcode 設定手順は `SETUP.md` にある。開発時の前提や設計上の決定は `CLAUDE.md` にまとめている。
 
 ## やらないこと
 
 - 動画編集（カット、エフェクト、合成）
 - ディスクオーサリング
-- App Sandbox の有効化、コード署名、公証、配布
+- App Sandbox の有効化、コード署名、公証、App Store やビルド済みバイナリでの配布
 - ffmpeg の同梱
 - Intel Mac / macOS 13 以下への対応
+
+## ライセンス
+
+MIT License。詳細は `LICENSE` を参照。
+
+ffmpeg / ffprobe はこのリポジトリに含まれておらず、利用者が Homebrew などで別途インストールしたものを外部プロセスとして起動する。ffmpeg 自体のライセンスは ffmpeg のビルド構成に従う。
