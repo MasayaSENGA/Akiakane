@@ -195,8 +195,18 @@ final class ADTSLayoutParserTests: XCTestCase {
         let report = parse(frames(stereo, count: 2) + frames(surround51, count: 10))
 
         XCTAssertEqual(report.segments.map(\.channels), [2, 6])
+        XCTAssertTrue(report.leadingSegmentIsUnconfirmed)
         XCTAssertTrue(report.isUnsafeToCopy)
         XCTAssertEqual(report.maxChannels, 6)
+    }
+
+    func testCorruptFirstFrameDoesNotStopTheConversion() throws {
+        // 先頭のフレームが壊れて ARIB 式のデュアルモノに見えても、それだけでは変換を止めない。
+        let report = parse(frames(aribDualMono, count: 1) + frames(stereo, count: 10))
+
+        XCTAssertTrue(report.leadingSegmentIsUnconfirmed)
+        XCTAssertTrue(report.isUnsafeToCopy, "コピーすると先頭のフレームの構成で全編が書かれる")
+        XCTAssertNoThrow(try report.checkConvertible(fileName: "rec.ts"))
     }
 
     func testDifferentLayoutInFirstFramesIsKeptInReverse() {

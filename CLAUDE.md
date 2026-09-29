@@ -53,7 +53,7 @@ Xcode を開いて手で確認してもらうのは最後の実行確認だけ�
 | `FFProbeReport.swift` | ffprobe の JSON デコード用 | 完成 |
 | `MediaInfo.swift` | アプリが扱うメタデータのドメインモデル | 完成 |
 | `FFProbeRunner.swift` | ffprobe 実行、および入力ファイルの収集 | 完成 |
-| `AkiakaneTests/` | `makeArguments`・音声の扱いの決定・ADTS の解析・`ProcessRunner` のキャンセル・進捗パーサ・出力先命名・設定保存のユニットテスト | 通過 |
+| `AkiakaneTests/` | `makeArguments`・音声の扱いの決定・ADTS の解析・ffprobe の JSON・`ProcessRunner` のキャンセル・`FFmpegRunner` の完了処理（偽の ffmpeg を使う）・同じファイルの判定・進捗パーサ・出力先命名・設定保存のユニットテスト | 通過 |
 
 ステップ4（1ファイルの変換・進捗・キャンセル）とステップ5（キュー管理・設定 UI）まで実装済み。
 実機での一括変換の動作確認はこれから。
@@ -91,6 +91,18 @@ xcodebuild -project Akiakane.xcodeproj -scheme Akiakane -configuration Debug tes
   `nonisolated` を明示する。付けないと「main actor-isolated ... in a synchronous nonisolated context」の警告が出る。
 - **出力先の決定（`makeOutputPlan`）は入力そのものと同じパスになる場合に `_h265` を強制する。**
   接尾辞を空にして同じフォルダ・同じコンテナで変換すると、入力ファイルを上書きしてしまうため。
+- **同じファイルかどうかは `refersToSameFile` で判定し、パスの文字列比較はしない。**
+  macOS 既定の APFS は大文字小文字を区別しない。`CLIP.MP4` の出力候補 `CLIP.mp4` を別物と判定すると、「上書きする」で入力が削除され出力に置き換わった。
+  実在するファイルは `fileResourceIdentifier` で、無ければ大文字小文字を無視したパスで比べる。`FFmpegRunner` も、出力先を削除する直前に同じ確認をする。
+  識別子が違っても、名前・大きさ・更新日時が同じなら同じとみなす（同じ共有の二重マウントや FUSE では、同じファイルが別の識別子で見える）。迷ったら同じとみなす。誤っても接尾辞が付くだけで済む。
+  名前が大文字小文字を除いて違えば、ファイルシステムに問い合わせずに別物とする。SwiftUI の描画中にも呼ばれるので、既定の設定で余計な stat をしない。
+- **ffmpeg が終了コード 0 でも、標準エラーに `Error during demuxing` があれば失敗にする（`inputReadError` / `inputReadFailure`）。**
+  ffmpeg は入力の読み取りエラー（NAS の切断など）を EOF として扱い、途中までの出力を確定させて正常終了する。見逃すと尻切れの出力が「完了」になる。
+  `-xerror` はデコードエラーでも止まるので、受信エラーのある放送 TS には使えない。放送 TS の受信エラーや末尾の切れでは、この行は出ない（60通り以上で確認済み）。
+  行の末尾が I/O 系のエラー（`Input/output error`、`Operation timed out` など）なら接続の問題として再試行を勧め、それ以外（壊れた AVI や MP4 の `Cannot allocate memory` など）はファイルの破損として扱う。
+- **静止画かどうかは ffprobe の `disposition`（`attached_pic` / `timed_thumbnails` / `still_image`）で判定し、`-map` はストリームの番号（`0:<index>`）で指定する。**
+  コーデック名（mjpeg など）で判定すると、Motion-JPEG の動画を静止画扱いにして、映像のない出力を作った。
+  `0:v:0` は映像の中での順番なので、静止画が本編より前にあると、解析したものと別のストリームを変換する。
 - **MPEG-TS の AAC 音声は、変換の前にファイル全体の ADTS ヘッダを走査する（`AudioLayoutScanner`）。**
   放送は録画の途中でチャンネル構成が変わる（CM はステレオ、本編は 5.1ch など）。MP4 / MKV の AAC は構成を1つしか持てないため、
   コピーすると切り替え以降が再生できない。デュアルモノは切り替えがなくても Apple で再生できない。どちらも ffmpeg は終了コード 0 で終わる。
@@ -100,6 +112,7 @@ xcodebuild -project Akiakane.xcodeproj -scheme Akiakane -configuration Debug tes
   ffmpeg だけで無劣化のまま切り替えを保つ方法（fMP4、MKV、TS 出力など）は、どれも Apple で再生できなかった。
 - **`ADTSLayoutParser` は先頭のフレームの構成を必ず区間として残し、PCE の構成を後続のフレームへ引き継ぐ。**
   コピーでは aac_adtstoasc が最初のフレームから構成を作るので、先頭の1〜2フレームだけ違っても全編が壊れる（3フレームの確定条件で捨ててはいけない）。
+  ただしこの区間は壊れたフレームのこともあるので（`leadingSegmentIsUnconfirmed`）、`checkConvertible` で変換を止める理由にはしない。
   ffmpeg などは PCE を最初のフレームにしか書かず、後続の channel_configuration 0 のフレームは先頭が SCE になる。引き継がないと、5.1ch を ARIB 式のデュアルモノ（2ch）と取り違えて `-ac 2` でダウンミックスする。
 - **ARIB 式のデュアルモノ（channel_configuration 0、PCE なし）を含む録画と、チャンネル数を判定できない区間を含む切り替えは、変換を止める（`AudioLayoutReport.checkConvertible`）。**
   ffmpeg 9 の aac デコーダは前者を1フレームも復号できず、その区間が無音になり、Apple では以降の音声がずれる。後者は `-ac` を決められず、5.1ch を落とすおそれがある。

@@ -19,7 +19,8 @@ enum TestFixtures {
         channels: Int? = nil,
         channelLayout: String? = nil,
         duration: String? = nil,
-        bitRate: String? = nil
+        bitRate: String? = nil,
+        attachedPic: Int? = nil
     ) -> FFProbeReport.Stream {
         FFProbeReport.Stream(
             index: index,
@@ -42,7 +43,8 @@ enum TestFixtures {
             channelLayout: channelLayout,
             duration: duration,
             bitRate: bitRate,
-            tags: nil
+            tags: nil,
+            disposition: attachedPic.map { FFProbeReport.Disposition(attachedPic: $0) }
         )
     }
 

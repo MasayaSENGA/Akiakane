@@ -38,6 +38,16 @@ final class OutputPlanTests: XCTestCase {
         XCTAssertEqual(result, .write(URL(fileURLWithPath: "/Volumes/Rec/movie_h265.mp4")))
     }
 
+    func testEmptySuffixNeverOverwritesInputWithUppercaseExtension() {
+        // macOS 既定の APFS は大文字小文字を区別しない。CLIP.MP4 と CLIP.mp4 は同じファイルになる。
+        let cameraClip = URL(fileURLWithPath: "/Volumes/Card/DCIM/CLIP.MP4")
+        var output = OutputSettings()
+        output.suffix = ""
+        output.existingFilePolicy = .overwrite
+        let result = makeOutputPlan(for: cameraClip, encode: EncodeSettings(), output: output) { _ in true }
+        XCTAssertEqual(result, .write(URL(fileURLWithPath: "/Volumes/Card/DCIM/CLIP_h265.mp4")))
+    }
+
     func testRenamePolicyAppendsCounterUntilFree() {
         var output = OutputSettings()
         output.existingFilePolicy = .rename
@@ -63,5 +73,55 @@ final class OutputPlanTests: XCTestCase {
         let existing: Set<String> = ["/Volumes/Rec/番組 第1話_h265.mp4"]
         XCTAssertEqual(plan(output: output, existing: existing),
                        .skip(existing: URL(fileURLWithPath: "/Volumes/Rec/番組 第1話_h265.mp4")))
+    }
+}
+
+// MARK: - 同じファイルかどうか
+
+final class SameFileTests: XCTestCase {
+
+    private var folder: URL!
+
+    override func setUpWithError() throws {
+        folder = FileManager.default.temporaryDirectory.appendingPathComponent("SameFileTests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: folder)
+    }
+
+    func testSameFileThroughSymbolicLinkedFolder() throws {
+        let clip = folder.appendingPathComponent("clip.mp4")
+        try Data([1]).write(to: clip)
+        let link = folder.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: folder)
+
+        XCTAssertTrue(refersToSameFile(link.appendingPathComponent("clip.mp4"), clip))
+    }
+
+    func testDifferentFilesAreNotTheSame() throws {
+        let a = folder.appendingPathComponent("a.mp4")
+        let b = folder.appendingPathComponent("b.mp4")
+        try Data([1]).write(to: a)
+        try Data([2]).write(to: b)
+
+        XCTAssertFalse(refersToSameFile(a, b))
+    }
+
+    func testPathsDifferingOnlyInCaseAreTheSameWhenFileIsMissing() {
+        XCTAssertTrue(refersToSameFile(folder.appendingPathComponent("CLIP.MP4"), folder.appendingPathComponent("clip.mp4")))
+    }
+
+    func testPrivatePrefixDoesNotMatterForMissingFiles() {
+        // 一時フォルダは /var/folders/… にあり、実体は /private/var/folders/…。
+        let plain = folder.appendingPathComponent("new.mp4")
+        let withPrivate = URL(fileURLWithPath: "/private" + folder.resolvingSymlinksInPath().path).appendingPathComponent("NEW.MP4")
+        XCTAssertTrue(refersToSameFile(plain, withPrivate))
+    }
+
+    func testDifferentNamesAreNotTheSameWithoutTouchingTheDisk() {
+        // 既定の接尾辞 _h265 では名前が必ず違うので、ファイルシステムに問い合わせずに別物とする。
+        XCTAssertFalse(refersToSameFile(URL(fileURLWithPath: "/Volumes/Rec/番組.ts"), URL(fileURLWithPath: "/Volumes/Rec/番組_h265.mp4")))
     }
 }

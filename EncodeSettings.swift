@@ -146,13 +146,15 @@ enum OutputPlan: Equatable {
 /// 入力ファイルと設定から出力先を決める。
 ///
 /// 副作用を持たないよう、ファイルの存在確認は引数で渡す。
-/// 出力が入力そのものと同じパスになる場合（拡張子・フォルダが同じで接尾辞が空）は、
-/// 入力を壊さないよう強制的に `_h265` を付ける。
+/// 出力が入力そのものになる場合（フォルダとコンテナが同じで接尾辞が空）は、
+/// 入力を壊さないよう強制的に `_h265` を付ける。同じファイルかどうかは `sameFile` で判定し、
+/// 既定では大文字小文字の違い（`CLIP.MP4` と `CLIP.mp4`）やシンボリックリンクも同じファイルとみなす。
 func makeOutputPlan(
     for input: URL,
     encode: EncodeSettings,
     output: OutputSettings,
-    fileExists: (URL) -> Bool
+    fileExists: (URL) -> Bool,
+    sameFile: (URL, URL) -> Bool = refersToSameFile
 ) -> OutputPlan {
     let folder = output.destinationFolderURL ?? input.deletingLastPathComponent()
     var baseName = input.deletingPathExtension().lastPathComponent + output.suffix
@@ -162,7 +164,7 @@ func makeOutputPlan(
         folder.appendingPathComponent(name).appendingPathExtension(ext)
     }
 
-    if candidate(baseName).standardizedFileURL.path == input.standardizedFileURL.path {
+    if sameFile(candidate(baseName), input) {
         baseName += "_h265"
     }
 
@@ -182,6 +184,43 @@ func makeOutputPlan(
             counter += 1
         }
     }
+}
+
+/// 2つの URL が同じファイルを指すか。
+///
+/// macOS 既定の APFS は大文字小文字を区別しないので、`CLIP.MP4` と `CLIP.mp4` は同じファイルになる。
+/// 両方が実在すればファイルの実体（`fileResourceIdentifier`）で比べ、大文字小文字の違いや
+/// シンボリックリンクも見抜く。どちらかが無ければ、パスを大文字小文字を無視して比べる。
+/// 迷ったときは同じとみなす。別のファイルを同じとみなしても出力名に接尾辞が付くだけで、入力を失うことはない。
+func refersToSameFile(_ a: URL, _ b: URL) -> Bool {
+    // 同じディレクトリエントリなら、ファイル名は大文字小文字を除いて一致する。一致しなければ別のファイルとし、
+    // ファイルシステムに問い合わせない（SwiftUI の描画中にも呼ばれるので、既定の設定で余計な stat をしない）。
+    // 名前の違うハードリンクやシンボリックリンクは別物と判定されるが、削除されるのはリンクだけで、入力は残る。
+    guard a.lastPathComponent.compare(b.lastPathComponent, options: .caseInsensitive) == .orderedSame else {
+        return false
+    }
+
+    // URL はリソース値をキャッシュするので、作り直してから問い合わせる。
+    let fresh = { (url: URL) in URL(fileURLWithPath: url.path) }
+    let keys: Set<URLResourceKey> = [.fileResourceIdentifierKey, .fileSizeKey, .contentModificationDateKey]
+    if let valuesA = try? fresh(a).resourceValues(forKeys: keys),
+       let valuesB = try? fresh(b).resourceValues(forKeys: keys),
+       let idA = valuesA.fileResourceIdentifier,
+       let idB = valuesB.fileResourceIdentifier {
+        if idA.isEqual(idB) { return true }
+        // 同じ共有を二重にマウントした場合や FUSE では、同じファイルが別の識別子で見える。
+        // 名前に加えて大きさと更新日時まで同じなら、同じファイルとみなす。
+        return valuesA.fileSize == valuesB.fileSize
+            && valuesA.contentModificationDate == valuesB.contentModificationDate
+    }
+
+    // 親フォルダだけを解決して、最後の要素を付け直す。`resolvingSymlinksInPath` は実在するパスの
+    // `/private` しか取り除かないので、パス全体を解決すると、実在するほうとしないほうで形が揃わない。
+    let resolved = { (url: URL) in
+        url.standardizedFileURL.deletingLastPathComponent().resolvingSymlinksInPath()
+            .appendingPathComponent(url.lastPathComponent).path
+    }
+    return resolved(a).compare(resolved(b), options: .caseInsensitive) == .orderedSame
 }
 
 // MARK: - 永続化
@@ -318,6 +357,10 @@ private func copyFallbackNote(layout: AudioLayoutReport, encoding: AACEncoding) 
     guard layout.hasLayoutChange else {
         return "二か国語（デュアルモノ）の音声はコピーすると Apple 製のアプリで再生できないため、\(encoding.displayName)に変換する。主音声が左、副音声が右に入る。"
     }
+    // 先頭の数フレームだけが違う（切り替えの直前から録画が始まった、先頭のフレームが壊れている、など）。
+    if layout.leadingSegmentIsUnconfirmed, layout.segments.count == 2 {
+        return "音声の先頭の数フレームだけ構成が違う。コピーすると全編が再生できなくなるため、\(encoding.displayName)に変換する。"
+    }
     var note = layoutChangeDescription(layout)
         + "コピーすると切り替え以降が再生できなくなるため、\(encoding.displayName)に変換する。"
         + paddingNote(layout: layout, encoding: encoding)
@@ -367,8 +410,10 @@ func makeArguments(input: MediaInfo, output: URL, settings: EncodeSettings, audi
     let hasVideo = input.primaryVideo != nil
     let hasAudio = input.primaryAudio != nil && audio != .omit
 
-    if hasVideo { arguments += ["-map", "0:v:0"] }
-    if hasAudio { arguments += ["-map", "0:a:0"] }
+    // ffprobe で解析したのと同じストリームを、ストリームの番号で指定する。`0:v:0` は映像の中での順番なので、
+    // 静止画のストリームが本編より前にあると、解析したものとは別のストリームを変換してしまう。
+    if let video = input.primaryVideo { arguments += ["-map", "0:\(video.index)"] }
+    if hasAudio, let audio = input.primaryAudio { arguments += ["-map", "0:\(audio.index)"] }
 
     if hasVideo {
         arguments += videoArguments(settings: settings)

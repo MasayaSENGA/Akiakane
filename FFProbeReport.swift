@@ -51,6 +51,28 @@ struct FFProbeReport: Decodable {
         let duration: String?
         let bitRate: String?
         let tags: [String: String]?
+        let disposition: Disposition?
+    }
+
+    /// ストリームの用途を表すフラグ。使うものだけを decode し、ほかのキーは無視する。
+    struct Disposition: Decodable {
+        /// カバーアートなど、動画ではなく静止画として添付されたストリームなら 1。
+        let attachedPic: Int?
+        /// 動画の見出し用のサムネイル画像の列なら 1。
+        let timedThumbnails: Int?
+        /// 静止画のトラックなら 1。
+        let stillImage: Int?
+
+        init(attachedPic: Int? = nil, timedThumbnails: Int? = nil, stillImage: Int? = nil) {
+            self.attachedPic = attachedPic
+            self.timedThumbnails = timedThumbnails
+            self.stillImage = stillImage
+        }
+
+        /// 本編の映像ではなく、静止画として扱うストリームか。
+        var isStillImage: Bool {
+            attachedPic == 1 || timedThumbnails == 1 || stillImage == 1
+        }
     }
 
     static func decode(from data: Data) throws -> FFProbeReport {

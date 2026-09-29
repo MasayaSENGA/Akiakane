@@ -193,9 +193,10 @@ struct MediaInfo: Identifiable, Sendable {
         for stream in streams {
             switch stream.codecType {
             case "video":
-                // 静止画（サムネイル・アルバムアート）は映像ストリームとして数えない。
-                if let codec = stream.codecName,
-                   ["mjpeg", "png", "bmp", "gif"].contains(codec) {
+                // 静止画（サムネイル・アルバムアート）は映像ストリームとして数えない。ffprobe は disposition で示す。
+                // コーデック名で判定すると、Motion-JPEG の動画（古いデジカメの .avi / .mov）まで静止画扱いになり、
+                // 映像のない出力を作ってしまう。
+                if stream.disposition?.isStillImage == true {
                     others += 1
                 } else {
                     videos.append(VideoStreamInfo(stream: stream))

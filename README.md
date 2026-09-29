@@ -8,9 +8,9 @@ macOS 用の動画一括変換アプリ。放送録画由来の `.ts` / `.m2ts` 
 
 ## 動作環境
 
-- macOS 14.0 以降、Apple Silicon
+- 実行: macOS 14.0 以降、Apple Silicon
 - Homebrew の ffmpeg / ffprobe（`brew install ffmpeg`）
-- Xcode 26 以降（ビルド用）
+- ビルド: Xcode 26 以降。Xcode 26 は macOS 15.6 以降でしか動かないので、macOS 14 の Mac で使う場合は、ほかの Mac でビルドした .app を持っていく
 
 App Sandbox は無効にしてある。有効にすると `Process` から ffmpeg を起動できなくなる。コード署名と公証もしていないため、App Store には出せない。
 
@@ -58,7 +58,7 @@ Xcode で `Akiakane` スキームを選んで Run する。Signing はローカ�
 
 ```
 ffmpeg -hide_banner -nostdin -y -fflags +genpts -i input.ts \
-  -map 0:v:0 -map 0:a:0 \
+  -map 0:0 -map 0:1 \
   -c:v libx265 -crf 21 -preset slow -pix_fmt yuv420p \
   -vf bwdif=mode=send_frame:parity=auto:deint=interlaced \
   -c:a copy -bsf:a aac_adtstoasc \
@@ -66,9 +66,12 @@ ffmpeg -hide_banner -nostdin -y -fflags +genpts -i input.ts \
   -progress pipe:1 -nostats -loglevel error -f mp4 input_h265.mp4.partial
 ```
 
+- `-map` は ffprobe で解析した映像・音声を、ストリームの番号で指定する（例は映像が 0 番、音声が 1 番の場合）。カバーアートなどの静止画は映像として数えない
 - `-tag:v hvc1` がないと QuickTime や Apple 製デバイスで HEVC が再生できない
 - 出力は `.partial` 名で書き、成功後にリネームする。そのため `-f` でコンテナ形式を明示している
 - インターレース解除は ffprobe の `field_order` を見て判断する。取れない素材は、インターレースとマークされたフレームだけを解除する
+- 入力が途中で読めなくなった場合（NAS の切断など）、ffmpeg は途中までの出力を確定させて正常終了する。アプリは標準エラーの `Error during demuxing` を見て失敗とし、途中までの出力は残さない
+- 出力先が入力ファイルそのものになる場合は、ファイル名に `_h265` を付ける。macOS は既定でファイル名の大文字小文字を区別しないので、`CLIP.MP4` と `CLIP.mp4` も同じファイルとして扱う
 
 ### 放送 TS の音声
 
@@ -77,7 +80,7 @@ ffmpeg -hide_banner -nostdin -y -fflags +genpts -i input.ts \
 そこで、`.ts` / `.m2ts` / `.mts` の AAC 音声は、変換の前にファイル全体の ADTS ヘッダを読んで構成を調べる。音声はデコードしないので、所要時間はディスクの読み出し速度で決まる（SSD で十数秒まで、HDD や NAS では数分）。
 
 ```
-ffmpeg -hide_banner -nostdin -loglevel error -i input.ts -map 0:a:0 -c copy -f data pipe:1
+ffmpeg -hide_banner -nostdin -loglevel error -i input.ts -map 0:1 -c copy -f data pipe:1
 ```
 
 - 構成が1つだけなら、設定どおりコピーする。5.1ch は無劣化のまま 5.1ch で残る
@@ -104,7 +107,7 @@ xcodebuild -project Akiakane.xcodeproj -scheme Akiakane -configuration Debug bui
 xcodebuild -project Akiakane.xcodeproj -scheme Akiakane -configuration Debug test -destination 'platform=macOS'
 ```
 
-ユニットテストは ffmpeg を起動せず、引数の組み立て、音声の扱いの決定、ADTS ヘッダの解析、`-progress` 出力のパース、出力先の命名、設定の保存を検証する。`ProcessRunner` のテストだけは `/bin/sleep` などの macOS 標準コマンドを起動する。
+ユニットテストは本物の ffmpeg を起動せず、引数の組み立て、音声の扱いの決定、ADTS ヘッダの解析、ffprobe の JSON の読み取り、`-progress` 出力のパース、出力先の命名、設定の保存を検証する。`ProcessRunner` のテストは `/bin/sleep` などの macOS 標準コマンドを、`FFmpegRunner` のテストは ffmpeg の代わりの小さなシェルスクリプトを起動し、一時フォルダに実際のファイルを作って完了処理を確かめる。
 
 ### 自分用の .app を作る
 

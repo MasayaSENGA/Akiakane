@@ -27,6 +27,9 @@ nonisolated struct AudioLayoutReport: Equatable, Sendable {
     /// 構成を現れた順に並べたもの。同じ構成が続く間は1つにまとめる。
     /// 先頭のフレームは、続く区間と違っても必ず含める（`ADTSLayoutParser.finish()` を参照）。
     let segments: [AACFrameLayout]
+    /// `segments` の先頭が、確定条件を満たさない先頭の数フレームだけの区間か。
+    /// 録画が切り替えの直前から始まった場合のほか、先頭のフレームが壊れているだけのこともある。
+    var leadingSegmentIsUnconfirmed = false
 
     /// 途中で構成が切り替わるか。
     var hasLayoutChange: Bool { segments.count > 1 }
@@ -50,12 +53,15 @@ nonisolated struct AudioLayoutReport: Equatable, Sendable {
 
     /// 変換を続けてよい構成か確かめる。音声を失ったり、5.1ch を落としたりするおそれがあれば止める。
     func checkConvertible(fileName: String) throws {
-        if segments.contains(where: \.isUndecodableByFFmpeg) {
+        // 先頭の数フレームだけの区間は、壊れたフレームのこともあるので、変換を止める理由にはしない。
+        // 再エンコードすれば、復号できなかった分は無音で補われるだけで済む。
+        let checked = leadingSegmentIsUnconfirmed ? Array(segments.dropFirst()) : segments
+        if checked.contains(where: \.isUndecodableByFFmpeg) {
             throw AudioLayoutError.undecodableDualMono(fileName: fileName)
         }
         // 構成が変わるなら再エンコードになる。チャンネル数の分からない区間があると、
         // `-ac` に渡す最大チャンネル数を決められず、5.1ch をステレオに落とすおそれがある。
-        if isUnsafeToCopy, segments.contains(where: { $0.channels == nil }) {
+        if isUnsafeToCopy, checked.contains(where: { $0.channels == nil }) {
             throw AudioLayoutError.undeterminedLayout(fileName: fileName)
         }
     }
@@ -127,10 +133,12 @@ nonisolated final class ADTSLayoutParser: @unchecked Sendable {
         // コピーするとき、aac_adtstoasc は最初のフレームのヘッダから AudioSpecificConfig を作る。
         // 先頭の1〜2フレームだけ構成が違う（切り替えの直前から録画が始まった、など）と、
         // 確定前に捨てた構成で全編が書かれて再生できなくなる。先頭のフレームは必ず区間として残す。
+        var leadingIsUnconfirmed = false
         if let firstLayout, firstLayout != result.first {
             result.insert(firstLayout, at: 0)
+            leadingIsUnconfirmed = true
         }
-        return AudioLayoutReport(frameCount: frameCount, segments: result)
+        return AudioLayoutReport(frameCount: frameCount, segments: result, leadingSegmentIsUnconfirmed: leadingIsUnconfirmed)
     }
 
     // MARK: フレームの切り出し
@@ -372,7 +380,7 @@ enum AudioLayoutScanError: LocalizedError {
             let detail = message.isEmpty ? "詳細なメッセージはありません。" : message
             return "\(fileName) の音声の構成を調べられませんでした（終了コード \(status)）。\n\(detail)"
         case .unknownAudioFormat(let fileName):
-            return "\(fileName) の音声の形式を ffmpeg が判定できませんでした。冒頭から ARIB 式の二か国語音声（channel_configuration 0）になっている可能性があります。"
+            return "\(fileName) の音声の形式を ffmpeg が判定できませんでした。冒頭から ARIB 式の二か国語音声（channel_configuration 0）になっているか、音声が映像より大きく遅れて始まっている可能性があります。"
         case .noFrames(let fileName):
             return "\(fileName) の音声から AAC のフレームを読み取れませんでした。"
         }
@@ -410,14 +418,15 @@ struct AudioLayoutScanner {
         return input.primaryAudio?.codecName == "aac"
     }
 
-    /// 変換と同じ第1音声ストリーム（`-map 0:a:0`）を、加工せずに標準出力へ流す引数。
+    /// 変換と同じ第1音声ストリームを、加工せずに標準出力へ流す引数。
     /// `-f adts` は extradata からヘッダを書き直すことがあり、切り替えを隠すおそれがあるので、
     /// パケットをそのまま書き出す `-f data` を使う。
     static func arguments(for input: MediaInfo) -> [String] {
-        [
+        let stream = input.primaryAudio.map { "0:\($0.index)" } ?? "0:a:0"
+        return [
             "-hide_banner", "-nostdin", "-loglevel", "error",
             "-i", input.url.path,
-            "-map", "0:a:0", "-c", "copy",
+            "-map", stream, "-c", "copy",
             "-f", "data", "pipe:1"
         ]
     }
@@ -449,6 +458,10 @@ struct AudioLayoutScanner {
                 status: result.terminationStatus,
                 message: result.stderrTail()
             )
+        }
+        // 読み取りエラーでも ffmpeg は終了コード 0 で終わる。途中までの走査で判断しない。
+        if let failure = inputReadFailure(inFFmpegStandardError: result.stderrText, fileName: input.fileName) {
+            throw failure
         }
         let report = parser.finish()
         guard report.frameCount > 0 else {

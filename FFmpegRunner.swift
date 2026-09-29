@@ -121,12 +121,21 @@ nonisolated final class FFmpegProgressAccumulator: @unchecked Sendable {
 
 enum FFmpegRunnerError: LocalizedError {
     case encodeFailed(fileName: String, status: Int32, message: String)
+    case inputReadFailed(fileName: String, message: String)
+    case inputCorrupted(fileName: String, message: String)
+    case outputIsInput(fileName: String)
 
     var errorDescription: String? {
         switch self {
         case .encodeFailed(let fileName, let status, let message):
             let detail = message.isEmpty ? "詳細なメッセージはありません。" : message
             return "\(fileName) の変換に失敗しました（終了コード \(status)）。\n\(detail)"
+        case .inputReadFailed(let fileName, let message):
+            return "\(fileName) を途中から読み取れなくなったため、変換を止めました。途中までの出力は残していません。\n\(message)"
+        case .inputCorrupted(let fileName, let message):
+            return "\(fileName) は途中が壊れていて、それ以降を読み取れなかったため、変換を止めました。途中までの出力は残していません。\n\(message)"
+        case .outputIsInput(let fileName):
+            return "\(fileName) の出力先が入力ファイルそのものになるため、変換を止めました。入力ファイルは変更していません。"
         }
     }
 
@@ -134,8 +143,41 @@ enum FFmpegRunnerError: LocalizedError {
         switch self {
         case .encodeFailed:
             return "入力ファイルが壊れていないか、必要なコーデックを ffmpeg がサポートしているか確認してください。"
+        case .inputReadFailed:
+            return "入力ファイルのあるドライブや NAS の接続を確かめてから、「待機に戻す」で変換し直してください。"
+        case .inputCorrupted:
+            return "入力ファイルが最後まで再生できるか確認してください。変換し直しても同じ結果になります。"
+        case .outputIsInput:
+            return "設定の「ファイル名の接尾辞」を入れるか、保存先を別のフォルダにしてください。"
         }
     }
+}
+
+/// ffmpeg の標準エラーから、入力の読み取りエラーを示す行を探す。
+///
+/// ffmpeg は入力の読み取りエラー（NAS の切断や、外付けディスクが外れたときの EIO など）を EOF として扱い、
+/// それまでの分で出力を確定させて終了コード 0 で終わる。終了コードだけを見ると、途中までの出力を
+/// 「完了」にしてしまう。放送 TS によくある受信エラー（デコーダのエラー）では、この行は出ない。
+nonisolated func inputReadError(inFFmpegStandardError text: String) -> String? {
+    // 2つ目は ffmpeg 6 以前の形式（`<入力>: Input/output error`）。設定で古い ffmpeg を指定された場合に備える。
+    let markers = ["Error during demuxing", "Input/output error"]
+    return text.split(separator: "\n")
+        .last { line in markers.contains { line.contains($0) } }
+        .map(String.init)
+}
+
+/// 読み取りエラーの行から、原因に合ったエラーを作る。
+/// ドライブや NAS の問題なら、つなぎ直して再試行すれば直る。ファイル自体が壊れている
+/// （壊れた AVI や MP4 でサイズ欄が狂い、メモリを確保できない、など）なら、再試行しても直らない。
+func inputReadFailure(inFFmpegStandardError text: String, fileName: String) -> FFmpegRunnerError? {
+    guard let line = inputReadError(inFFmpegStandardError: text) else { return nil }
+    let deviceErrors = [
+        "Input/output error", "Device not configured", "Operation timed out", "Socket is not connected",
+        "Stale NFS file handle", "Bad file descriptor", "Network is down", "Host is down", "Connection reset",
+    ]
+    return deviceErrors.contains { line.contains($0) }
+        ? .inputReadFailed(fileName: fileName, message: line)
+        : .inputCorrupted(fileName: fileName, message: line)
 }
 
 struct FFmpegRunner {
@@ -179,6 +221,11 @@ struct FFmpegRunner {
         onProgress: @escaping @Sendable (EncodeProgress) -> Void
     ) async throws {
         let executable = try executableURL ?? FFToolLocator.require(.ffmpeg)
+        // 出力先は makeOutputPlan で入力と重ならないようにしてあるが、完了時に出力先を削除するので、
+        // 入力を消さないよう実行の前にも確かめる。
+        guard !refersToSameFile(output, input.url) else {
+            throw FFmpegRunnerError.outputIsInput(fileName: input.fileName)
+        }
         let partialOutput = output.appendingPathExtension("partial")
         let arguments = makeArguments(input: input, output: partialOutput, settings: settings, audio: audio)
 
@@ -209,8 +256,15 @@ struct FFmpegRunner {
                     message: result.stderrTail()
                 )
             }
+            if let failure = inputReadFailure(inFFmpegStandardError: result.stderrText, fileName: input.fileName) {
+                try? FileManager.default.removeItem(at: partialOutput)
+                throw failure
+            }
 
             if FileManager.default.fileExists(atPath: output.path) {
+                guard !refersToSameFile(output, input.url) else {
+                    throw FFmpegRunnerError.outputIsInput(fileName: input.fileName)
+                }
                 try FileManager.default.removeItem(at: output)
             }
             try FileManager.default.moveItem(at: partialOutput, to: output)

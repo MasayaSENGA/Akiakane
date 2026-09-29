@@ -24,8 +24,8 @@ final class EncodeArgumentsTests: XCTestCase {
         let info = TestFixtures.mediaInfo(url: input, fieldOrder: "progressive")
         let args = makeArguments(input: info, output: output, settings: EncodeSettings())
 
-        XCTAssertTrue(args.containsConsecutive(["-map", "0:v:0"]))
-        XCTAssertTrue(args.containsConsecutive(["-map", "0:a:0"]))
+        XCTAssertTrue(args.containsConsecutive(["-map", "0:0"]))
+        XCTAssertTrue(args.containsConsecutive(["-map", "0:1"]))
         XCTAssertTrue(args.containsConsecutive(["-c:v", "libx265", "-crf", "21", "-preset", "slow", "-pix_fmt", "yuv420p"]))
         XCTAssertFalse(args.contains("-vf"), "プログレッシブ素材はインターレース解除しない")
         XCTAssertTrue(args.containsConsecutive(["-c:a", "copy"]))
@@ -111,7 +111,7 @@ final class EncodeArgumentsTests: XCTestCase {
         settings.audioMode = .none
         let args = makeArguments(input: info, output: output, settings: settings)
 
-        XCTAssertFalse(args.containsConsecutive(["-map", "0:a:0"]))
+        XCTAssertFalse(args.containsConsecutive(["-map", "0:1"]))
         XCTAssertFalse(args.contains("-c:a"))
     }
 
@@ -122,7 +122,7 @@ final class EncodeArgumentsTests: XCTestCase {
         let plan = AudioPlan.encode(AACEncoding(encoder: "aac_at", bitrate: 384, channels: 6))
         let args = makeArguments(input: info, output: output, settings: EncodeSettings(), audio: plan)
 
-        XCTAssertTrue(args.containsConsecutive(["-map", "0:a:0"]))
+        XCTAssertTrue(args.containsConsecutive(["-map", "0:1"]))
         XCTAssertTrue(args.containsConsecutive(["-c:a", "aac_at", "-b:a", "384k", "-ac", "6"]))
         XCTAssertTrue(args.containsConsecutive(["-af", "aresample=async=1"]), "復号できなかったフレームの分を無音で補い、同期を保つ")
         XCTAssertFalse(args.contains("-bsf:a"), "再エンコードするなら aac_adtstoasc は要らない")
@@ -148,7 +148,7 @@ final class EncodeArgumentsTests: XCTestCase {
         let info = TestFixtures.mediaInfo(url: input, fieldOrder: "progressive")
         let args = makeArguments(input: info, output: output, settings: EncodeSettings(), audio: .omit)
 
-        XCTAssertFalse(args.containsConsecutive(["-map", "0:a:0"]))
+        XCTAssertFalse(args.containsConsecutive(["-map", "0:1"]))
         XCTAssertFalse(args.contains("-c:a"))
     }
 }
@@ -202,6 +202,15 @@ final class AudioPlanTests: XCTestCase {
         XCTAssertTrue(note.contains("切り替え 2 回"), note)
         XCTAssertTrue(note.contains("AAC 5.1ch（384 kbps）に変換する"), note)
         XCTAssertTrue(note.contains("ステレオの区間は前方の左右に入り"), note)
+    }
+
+    func testLeadingFramesOnlyAreDescribedAsSuch() {
+        let info = TestFixtures.mediaInfo(url: tsInput, audioChannels: 2)
+        let scanned = AudioLayoutReport(frameCount: 1000, segments: [layout(2), layout(6)], leadingSegmentIsUnconfirmed: true)
+        let decision = makeAudioPlan(input: info, settings: EncodeSettings(), layout: scanned, aacEncoder: "aac")
+
+        XCTAssertEqual(decision.plan, .encode(AACEncoding(encoder: "aac", bitrate: 384, channels: 6)))
+        XCTAssertTrue(decision.note?.contains("先頭の数フレームだけ") ?? false, decision.note ?? "")
     }
 
     func testMonoToStereoSwitchDoesNotClaimSilentChannels() {
@@ -289,7 +298,7 @@ final class AudioPlanTests: XCTestCase {
     func testScanArgumentsCopyFirstAudioStreamWithoutDecoding() {
         let args = AudioLayoutScanner.arguments(for: TestFixtures.mediaInfo(url: tsInput))
 
-        XCTAssertTrue(args.containsConsecutive(["-map", "0:a:0", "-c", "copy"]))
+        XCTAssertTrue(args.containsConsecutive(["-map", "0:1", "-c", "copy"]))
         XCTAssertTrue(args.containsConsecutive(["-f", "data", "pipe:1"]))
         XCTAssertTrue(args.containsConsecutive(["-i", tsInput.path]))
     }
