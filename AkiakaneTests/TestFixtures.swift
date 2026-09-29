@@ -52,11 +52,15 @@ enum TestFixtures {
     ///   - durationSeconds: nil にすると `hasReliableDuration` が false になる。
     ///   - fieldOrder: ffprobe の `field_order` 値（"progressive" / "tt" / "bb" / nil で unknown）。
     ///   - includeAudio: 音声ストリームを含めるか。
+    ///   - audioCodec: 音声のコーデック名。
+    ///   - audioChannels: ffprobe が報告するチャンネル数（ファイル冒頭の構成）。
     static func mediaInfo(
         url: URL,
         durationSeconds: Double? = 120,
         fieldOrder: String? = "progressive",
-        includeAudio: Bool = true
+        includeAudio: Bool = true,
+        audioCodec: String = "aac",
+        audioChannels: Int = 2
     ) -> MediaInfo {
         var streams: [FFProbeReport.Stream] = [
             stream(
@@ -75,11 +79,11 @@ enum TestFixtures {
             streams.append(
                 stream(
                     index: 1,
-                    codecName: "aac",
+                    codecName: audioCodec,
                     codecType: "audio",
                     sampleRate: "48000",
-                    channels: 2,
-                    channelLayout: "stereo"
+                    channels: audioChannels,
+                    channelLayout: audioChannels == 6 ? "5.1" : "stereo"
                 )
             )
         }

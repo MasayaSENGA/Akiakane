@@ -63,12 +63,22 @@ struct SettingsInspector: View {
                     }
                 }
 
-                if case .aac(let bitrate) = queue.encodeSettings.audioMode {
+                switch queue.encodeSettings.audioMode {
+                case .copy:
+                    Text(".ts の音声が途中で 2ch と 5.1ch の間で切り替わる場合や、二か国語放送は、コピーすると再生できなくなる。そうしたファイルだけ AAC に変換する。5.1ch は 5.1ch のまま残す。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                case .aac(let bitrate):
                     Picker("ビットレート", selection: aacBitrateBinding(current: bitrate)) {
                         ForEach(AudioMode.aacBitrateChoices, id: \.self) { choice in
                             Text("\(choice) kbps").tag(choice)
                         }
                     }
+                    Text("ステレオを基準にしたビットレート。5.1ch の音声は2倍で変換する。.ts で途中に 5.1ch が含まれる場合は、全体を 5.1ch で変換する。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                case .none:
+                    EmptyView()
                 }
             }
 

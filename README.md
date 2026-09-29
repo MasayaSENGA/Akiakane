@@ -42,7 +42,7 @@ Xcode で `Akiakane` スキームを選んで Run する。Signing はローカ�
 | 映像コーデック | libx265（ソフトウェア）/ VideoToolbox（ハードウェア）/ コピー |
 | 画質 | libx265 は CRF（既定 21）とプリセット（既定 slow）。VideoToolbox は品質 1〜100（既定 65） |
 | インターレース解除 | しない / 素材から自動判定 / 常に解除する（bwdif） |
-| 音声 | コピー / AAC に変換（ビットレート指定）/ 含めない |
+| 音声 | コピー（必要なときだけ AAC に変換）/ AAC に変換（ビットレート指定）/ 含めない |
 | コンテナ | MP4 / MKV / MOV |
 | 保存先 | 入力と同じフォルダ / 指定したフォルダ |
 | ファイル名 | 元の名前 + 接尾辞（既定 `_h265`） |
@@ -70,6 +70,33 @@ ffmpeg -hide_banner -nostdin -y -fflags +genpts -i input.ts \
 - 出力は `.partial` 名で書き、成功後にリネームする。そのため `-f` でコンテナ形式を明示している
 - インターレース解除は ffprobe の `field_order` を見て判断する。取れない素材は、インターレースとマークされたフレームだけを解除する
 
+### 放送 TS の音声
+
+放送の録画は、途中で音声のチャンネル構成が変わることがある（前後の CM はステレオ、本編は 5.1ch など）。二か国語放送（デュアルモノ）もある。MP4 / MKV の AAC は構成を1つしか持てないため、そのままコピーすると、切り替え以降の音声が再生できなくなる。デュアルモノは、切り替えがなくても Apple 製のアプリで再生できない。ffmpeg はこの場合もエラーを出さずに終わる。
+
+そこで、`.ts` / `.m2ts` / `.mts` の AAC 音声は、変換の前にファイル全体の ADTS ヘッダを読んで構成を調べる。音声はデコードしないので、所要時間はディスクの読み出し速度で決まる（SSD で十数秒まで、HDD や NAS では数分）。
+
+```
+ffmpeg -hide_banner -nostdin -loglevel error -i input.ts -map 0:a:0 -c copy -f data pipe:1
+```
+
+- 構成が1つだけなら、設定どおりコピーする。5.1ch は無劣化のまま 5.1ch で残る
+- 途中で切り替わるか、デュアルモノなら、そのファイルだけ AAC に変換する。全体での最大チャンネル数を `-ac` で指定し、5.1ch を 5.1ch のまま保つ（例: `-af aresample=async=1 -c:a aac_at -b:a 384k -ac 6`）。ステレオの区間は前方の左右に入り、残りのチャンネルは無音になる
+- 先頭の1〜2フレームだけ構成が違う場合も、コピーすると全編が再生できなくなるので AAC に変換する（コピーは最初のフレームの構成で全編を書くため）
+- デュアルモノは、主音声が左、副音声が右に入る
+- 「AAC に変換」を選んだ場合も、同じ走査の結果でチャンネル数を指定する。`-ac` がないと ffmpeg は最初のフレームの構成でエンコーダを作るため、冒頭がステレオの録画では本編の 5.1ch がステレオに落ちる
+- 再エンコードでは `aresample=async=1` で、受信エラーなどで復号できなかったフレームの分を無音で補う。補わないと Apple 製のアプリでは音声が映像より先に進む
+- AAC のエンコーダは、ffmpeg に Apple の AudioToolbox（`aac_at`）があればそれを、なければ内蔵の `aac` を使う。ビットレートはステレオが基準で、5.1ch では2倍にする
+
+どう扱ったかは、変換中と完了後の詳細画面に出る。
+
+次の場合は、音声を失わないよう変換を止めて理由を表示する。音声が不要なら「音声を含めない」にすれば変換できる。
+
+- ARIB 式の二か国語（channel_configuration 0、PCE なし）を含む。ffmpeg はこの形式を復号できず、変換するとその区間が無音になり、以降の音声もずれる
+- 構成が途中で変わり、一部の区間のチャンネル数を判定できない。5.1ch をステレオに落とすおそれがある
+
+走査するのは `.ts` / `.m2ts` / `.mts` の AAC 音声だけ。AC-3 など他のコーデックの TS で途中にチャンネル数が変わる場合は、「AAC に変換」で 5.1ch がステレオに落ちることがある（日本の放送 TS は AAC なので該当しない）。
+
 ## ビルドとテスト
 
 ```bash
@@ -77,7 +104,7 @@ xcodebuild -project Akiakane.xcodeproj -scheme Akiakane -configuration Debug bui
 xcodebuild -project Akiakane.xcodeproj -scheme Akiakane -configuration Debug test -destination 'platform=macOS'
 ```
 
-ユニットテストは ffmpeg を起動せず、引数の組み立て、`-progress` 出力のパース、出力先の命名、設定の保存を検証する。
+ユニットテストは ffmpeg を起動せず、引数の組み立て、音声の扱いの決定、ADTS ヘッダの解析、`-progress` 出力のパース、出力先の命名、設定の保存を検証する。`ProcessRunner` のテストだけは `/bin/sleep` などの macOS 標準コマンドを起動する。
 
 ### 自分用の .app を作る
 
@@ -109,7 +136,8 @@ ffmpeg -f lavfi -i testsrc2=size=1440x1080:rate=30000/1001 -f lavfi -i sine=freq
 | `SettingsInspector.swift` | 変換設定・出力先の編集パネル |
 | `ToolSettingsView.swift` | ffmpeg / ffprobe のパス指定 |
 | `ConversionQueue.swift` | 変換キュー。読み込みと順次変換 |
-| `EncodeSettings.swift` | 設定モデル、ffmpeg 引数の組み立て、出力先の決定 |
+| `EncodeSettings.swift` | 設定モデル、音声の扱いの決定、ffmpeg 引数の組み立て、出力先の決定 |
+| `AudioLayoutScanner.swift` | 変換前の音声の走査（チャンネル構成の切り替えとデュアルモノの検出） |
 | `FFmpegRunner.swift` | ffmpeg の実行と進捗のパース |
 | `FFProbeRunner.swift` | ffprobe の実行と入力ファイルの収集 |
 | `FFProbeReport.swift` / `MediaInfo.swift` | ffprobe の JSON とドメインモデル |

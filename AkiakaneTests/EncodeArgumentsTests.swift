@@ -114,6 +114,185 @@ final class EncodeArgumentsTests: XCTestCase {
         XCTAssertFalse(args.containsConsecutive(["-map", "0:a:0"]))
         XCTAssertFalse(args.contains("-c:a"))
     }
+
+    // MARK: - 音声の扱いを渡したとき
+
+    func testEncodePlanPassesEncoderBitrateAndChannelCount() {
+        let info = TestFixtures.mediaInfo(url: input, fieldOrder: "progressive")
+        let plan = AudioPlan.encode(AACEncoding(encoder: "aac_at", bitrate: 384, channels: 6))
+        let args = makeArguments(input: info, output: output, settings: EncodeSettings(), audio: plan)
+
+        XCTAssertTrue(args.containsConsecutive(["-map", "0:a:0"]))
+        XCTAssertTrue(args.containsConsecutive(["-c:a", "aac_at", "-b:a", "384k", "-ac", "6"]))
+        XCTAssertTrue(args.containsConsecutive(["-af", "aresample=async=1"]), "復号できなかったフレームの分を無音で補い、同期を保つ")
+        XCTAssertFalse(args.contains("-bsf:a"), "再エンコードするなら aac_adtstoasc は要らない")
+    }
+
+    func testCopyPlanDoesNotResampleAudio() {
+        let info = TestFixtures.mediaInfo(url: input, fieldOrder: "progressive")
+        let args = makeArguments(input: info, output: output, settings: EncodeSettings(), audio: .copy)
+
+        XCTAssertFalse(args.contains("-af"), "コピーにはフィルタを掛けられない")
+    }
+
+    func testEncodePlanWithoutChannelCountLeavesLayoutToFFmpeg() {
+        let info = TestFixtures.mediaInfo(url: input, fieldOrder: "progressive")
+        let plan = AudioPlan.encode(AACEncoding(encoder: "aac", bitrate: 192, channels: nil))
+        let args = makeArguments(input: info, output: output, settings: EncodeSettings(), audio: plan)
+
+        XCTAssertTrue(args.containsConsecutive(["-c:a", "aac", "-b:a", "192k"]))
+        XCTAssertFalse(args.contains("-ac"))
+    }
+
+    func testOmitPlanDropsAudioEvenIfSettingsSayCopy() {
+        let info = TestFixtures.mediaInfo(url: input, fieldOrder: "progressive")
+        let args = makeArguments(input: info, output: output, settings: EncodeSettings(), audio: .omit)
+
+        XCTAssertFalse(args.containsConsecutive(["-map", "0:a:0"]))
+        XCTAssertFalse(args.contains("-c:a"))
+    }
+}
+
+// MARK: - 音声の扱いの決定
+
+final class AudioPlanTests: XCTestCase {
+
+    private let tsInput = URL(fileURLWithPath: "/tmp/rec.ts")
+
+    private func layout(_ channels: Int?, dualMono: Bool = false) -> AACFrameLayout {
+        AACFrameLayout(
+            profile: 1,
+            samplingFrequencyIndex: 3,
+            channelConfiguration: dualMono ? 2 : (channels == 8 ? 7 : channels ?? 0),
+            channels: channels,
+            isDualMono: dualMono
+        )
+    }
+
+    private func report(_ segments: [AACFrameLayout]) -> AudioLayoutReport {
+        AudioLayoutReport(frameCount: 1000, segments: segments)
+    }
+
+    func testCopyWithoutScanStaysCopy() {
+        let info = TestFixtures.mediaInfo(url: tsInput)
+        let decision = makeAudioPlan(input: info, settings: EncodeSettings(), layout: nil, aacEncoder: "aac_at")
+
+        XCTAssertEqual(decision.plan, .copy)
+        XCTAssertNil(decision.note)
+    }
+
+    func testCopyOfUniformSurroundStaysCopy() {
+        // 構成が変わらない 5.1ch は、無劣化のコピーで 5.1ch のまま残す。
+        let info = TestFixtures.mediaInfo(url: tsInput, audioChannels: 6)
+        let decision = makeAudioPlan(input: info, settings: EncodeSettings(), layout: report([layout(6)]), aacEncoder: "aac_at")
+
+        XCTAssertEqual(decision.plan, .copy)
+    }
+
+    func testCopyWithStereoToSurroundSwitchEncodesAsSurround() {
+        // 冒頭がステレオ（ffprobe は 2ch と報告）でも、途中の 5.1ch に合わせて 6ch で変換する。
+        let info = TestFixtures.mediaInfo(url: tsInput, audioChannels: 2)
+        let scanned = report([layout(2), layout(6), layout(2)])
+        let decision = makeAudioPlan(input: info, settings: EncodeSettings(), layout: scanned, aacEncoder: "aac_at")
+
+        XCTAssertEqual(decision.plan, .encode(AACEncoding(encoder: "aac_at", bitrate: 384, channels: 6)))
+        XCTAssertNotNil(decision.note, "設定と違う扱いにしたので、理由を伝える")
+        let note = decision.note ?? ""
+        XCTAssertTrue(note.contains("ステレオ・5.1ch"), note)
+        XCTAssertTrue(note.contains("切り替え 2 回"), note)
+        XCTAssertTrue(note.contains("AAC 5.1ch（384 kbps）に変換する"), note)
+        XCTAssertTrue(note.contains("ステレオの区間は前方の左右に入り"), note)
+    }
+
+    func testMonoToStereoSwitchDoesNotClaimSilentChannels() {
+        // モノラルの区間をステレオで変換すると左右に同じ音が入る。無音になるとは書かない。
+        let info = TestFixtures.mediaInfo(url: tsInput, audioChannels: 1)
+        let decision = makeAudioPlan(input: info, settings: EncodeSettings(), layout: report([layout(1), layout(2)]), aacEncoder: "aac")
+
+        XCTAssertEqual(decision.plan, .encode(AACEncoding(encoder: "aac", bitrate: 192, channels: 2)))
+        XCTAssertFalse(decision.note?.contains("無音") ?? true, decision.note ?? "")
+    }
+
+    func testSamplingRateOnlySwitchIsDescribedAsFormatChange() {
+        let info = TestFixtures.mediaInfo(url: tsInput)
+        let at48k = layout(2)
+        let at44k = AACFrameLayout(profile: 1, samplingFrequencyIndex: 4, channelConfiguration: 2, channels: 2, isDualMono: false)
+        let decision = makeAudioPlan(input: info, settings: EncodeSettings(), layout: report([at48k, at44k]), aacEncoder: "aac")
+
+        let note = decision.note ?? ""
+        XCTAssertTrue(note.contains("音声の形式"), note)
+        XCTAssertFalse(note.contains("ステレオ・ステレオ"), note)
+    }
+
+    func testCopyOfDualMonoEncodesAsStereo() {
+        let info = TestFixtures.mediaInfo(url: tsInput)
+        let decision = makeAudioPlan(input: info, settings: EncodeSettings(), layout: report([layout(2, dualMono: true)]), aacEncoder: "aac")
+
+        XCTAssertEqual(decision.plan, .encode(AACEncoding(encoder: "aac", bitrate: 192, channels: 2)))
+        XCTAssertTrue(decision.note?.contains("主音声が左、副音声が右") ?? false)
+    }
+
+    func testAACModeWithSwitchKeepsSurroundAndDoublesBitrate() {
+        let info = TestFixtures.mediaInfo(url: tsInput, audioChannels: 2)
+        var settings = EncodeSettings()
+        settings.audioMode = .aac(bitrate: 192)
+        let decision = makeAudioPlan(input: info, settings: settings, layout: report([layout(2), layout(6)]), aacEncoder: "aac_at")
+
+        XCTAssertEqual(decision.plan, .encode(AACEncoding(encoder: "aac_at", bitrate: 384, channels: 6)))
+        XCTAssertNotNil(decision.note)
+    }
+
+    func testAACModeWithoutScanUsesInputChannelsForBitrateOnly() {
+        // MP4 などの 5.1ch 入力。構成は1つなので -ac は付けず、ビットレートだけ2倍にする。
+        let info = TestFixtures.mediaInfo(url: URL(fileURLWithPath: "/tmp/movie.mp4"), audioChannels: 6)
+        var settings = EncodeSettings()
+        settings.audioMode = .aac(bitrate: 160)
+        let decision = makeAudioPlan(input: info, settings: settings, layout: nil, aacEncoder: "aac")
+
+        XCTAssertEqual(decision.plan, .encode(AACEncoding(encoder: "aac", bitrate: 320, channels: nil)))
+        XCTAssertNil(decision.note)
+    }
+
+    func testAACModeKeepsStereoBitrate() {
+        let info = TestFixtures.mediaInfo(url: tsInput)
+        var settings = EncodeSettings()
+        settings.audioMode = .aac(bitrate: 256)
+        let decision = makeAudioPlan(input: info, settings: settings, layout: report([layout(2)]), aacEncoder: "aac")
+
+        XCTAssertEqual(decision.plan, .encode(AACEncoding(encoder: "aac", bitrate: 256, channels: 2)))
+    }
+
+    func testNoneAndMissingAudioAreOmitted() {
+        var settings = EncodeSettings()
+        settings.audioMode = .none
+        let info = TestFixtures.mediaInfo(url: tsInput)
+        XCTAssertEqual(makeAudioPlan(input: info, settings: settings, layout: nil, aacEncoder: "aac").plan, .omit)
+
+        let silent = TestFixtures.mediaInfo(url: tsInput, includeAudio: false)
+        XCTAssertEqual(makeAudioPlan(input: silent, settings: EncodeSettings(), layout: nil, aacEncoder: "aac").plan, .omit)
+    }
+
+    // MARK: 走査が必要かどうか
+
+    func testScanIsNeededOnlyForAACInTransportStreams() {
+        let settings = EncodeSettings()
+        XCTAssertTrue(AudioLayoutScanner.needsScan(input: TestFixtures.mediaInfo(url: tsInput), settings: settings))
+        XCTAssertTrue(AudioLayoutScanner.needsScan(input: TestFixtures.mediaInfo(url: URL(fileURLWithPath: "/tmp/rec.M2TS")), settings: settings))
+        XCTAssertFalse(AudioLayoutScanner.needsScan(input: TestFixtures.mediaInfo(url: URL(fileURLWithPath: "/tmp/movie.mp4")), settings: settings))
+        XCTAssertFalse(AudioLayoutScanner.needsScan(input: TestFixtures.mediaInfo(url: URL(fileURLWithPath: "/tmp/00000.mts"), audioCodec: "ac3"), settings: settings))
+
+        var none = EncodeSettings()
+        none.audioMode = .none
+        XCTAssertFalse(AudioLayoutScanner.needsScan(input: TestFixtures.mediaInfo(url: tsInput), settings: none))
+    }
+
+    func testScanArgumentsCopyFirstAudioStreamWithoutDecoding() {
+        let args = AudioLayoutScanner.arguments(for: TestFixtures.mediaInfo(url: tsInput))
+
+        XCTAssertTrue(args.containsConsecutive(["-map", "0:a:0", "-c", "copy"]))
+        XCTAssertTrue(args.containsConsecutive(["-f", "data", "pipe:1"]))
+        XCTAssertTrue(args.containsConsecutive(["-i", tsInput.path]))
+    }
 }
 
 private extension Array where Element: Equatable {

@@ -26,9 +26,11 @@
 		64ED03F2C4B3E27158446572 /* Exceptions for "Akiakane" folder in "Akiakane" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				AkiakaneTests/AudioLayoutScannerTests.swift,
 				AkiakaneTests/EncodeArgumentsTests.swift,
 				AkiakaneTests/FFmpegProgressParserTests.swift,
 				AkiakaneTests/OutputPlanTests.swift,
+				AkiakaneTests/ProcessRunnerTests.swift,
 				AkiakaneTests/SettingsPersistenceTests.swift,
 				AkiakaneTests/TestFixtures.swift,
 				Scripts/DrawIcon.swift,

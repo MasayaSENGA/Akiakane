@@ -39,7 +39,7 @@ enum AudioMode: Codable, Sendable, Equatable {
 
         var displayName: String {
             switch self {
-            case .copy: return "コピー（再エンコードしない）"
+            case .copy: return "コピー（必要なときだけ AAC に変換）"
             case .aac:  return "AAC に変換"
             case .none: return "音声を含めない"
             }
@@ -56,6 +56,13 @@ enum AudioMode: Codable, Sendable, Equatable {
 
     static let aacBitrateChoices = [128, 160, 192, 256, 320]
     static let defaultAACBitrate = 192
+
+    /// 選んだビットレートはステレオを基準にする。3ch 以上（5.1ch など）では2倍にして、
+    /// チャンネルあたりの割り当てが痩せないようにする（192 kbps → 384 kbps）。
+    static func aacBitrate(base: Int, channels: Int?) -> Int {
+        guard let channels, channels > 2 else { return base }
+        return base * 2
+    }
 }
 
 enum Container: String, Codable, CaseIterable, Sendable, Equatable {
@@ -212,15 +219,145 @@ enum SettingsStore {
     }
 }
 
-// MARK: - ffmpeg の引数
+// MARK: - 入力の種類
 
 /// `.ts` / `.m2ts` / `.mts` など、MPEG-TS 由来の入力かどうか。
-/// aac_adtstoasc バイトストリームフィルタが必要かどうかの判定に使う。
+/// aac_adtstoasc バイトストリームフィルタが必要かどうかと、音声の事前走査が必要かどうかの判定に使う。
 private let mpegTransportStreamExtensions: Set<String> = ["ts", "m2ts", "mts"]
+
+extension MediaInfo {
+    var isMPEGTransportStream: Bool {
+        mpegTransportStreamExtensions.contains(url.pathExtension.lowercased())
+    }
+}
+
+// MARK: - 音声の扱い
+
+/// 音声を実際にどう書き出すか。設定（`AudioMode`）と、変換前に調べた音声の構成から決める。
+enum AudioPlan: Equatable, Sendable {
+    /// 音声を含めない。
+    case omit
+    /// 再エンコードせずにコピーする。
+    case copy
+    /// AAC に再エンコードする。
+    case encode(AACEncoding)
+}
+
+struct AACEncoding: Equatable, Sendable {
+    /// ffmpeg のエンコーダ名。`aac_at`（Apple の AudioToolbox）か `aac`（ffmpeg 内蔵）。
+    var encoder: String
+    /// kbps。
+    var bitrate: Int
+    /// 出力のチャンネル数。nil なら ffmpeg に任せる（最初のフレームの構成になる）。
+    var channels: Int?
+
+    var displayName: String {
+        guard let channels else { return "AAC（\(bitrate) kbps）" }
+        return "AAC \(AACFrameLayout.channelCountName(channels))（\(bitrate) kbps）"
+    }
+}
+
+/// 音声の扱いと、それを利用者に伝えるための説明。
+struct AudioDecision: Equatable, Sendable {
+    let plan: AudioPlan
+    /// 設定から素直に決まる扱いと違うときの説明。伝えることがなければ nil。
+    let note: String?
+}
+
+/// 設定と音声の構成から、音声をどう書き出すかを決める。
+///
+/// `layout` は変換前に ADTS ヘッダを走査した結果（`AudioLayoutScanner`）で、MPEG-TS の AAC 以外では nil。
+/// 放送 TS は録画の途中でチャンネル構成が変わる（CM はステレオ、本編は 5.1ch など）。
+/// MP4 / MKV の AAC は構成を1つしか持てないので、コピーすると切り替え以降が再生できなくなる。
+/// その場合だけ AAC に変換し、全体での最大チャンネル数を `-ac` で指定して 5.1ch を 5.1ch のまま保つ。
+/// `-ac` を付けないと ffmpeg は最初のフレームの構成でエンコーダを作るため、
+/// 冒頭がステレオの録画では本編の 5.1ch を黙ってステレオに落とす。
+func makeAudioPlan(
+    input: MediaInfo,
+    settings: EncodeSettings,
+    layout: AudioLayoutReport?,
+    aacEncoder: String
+) -> AudioDecision {
+    guard let audio = input.primaryAudio else { return AudioDecision(plan: .omit, note: nil) }
+
+    // 走査の結果があれば、全体での最大チャンネル数を明示する。
+    let targetChannels: Int? = layout.flatMap { layout in
+        [layout.maxChannels, audio.channels].compactMap { $0 }.max()
+    }
+
+    switch settings.audioMode {
+    case .none:
+        return AudioDecision(plan: .omit, note: nil)
+
+    case .copy:
+        guard let layout, layout.isUnsafeToCopy else { return AudioDecision(plan: .copy, note: nil) }
+        let encoding = AACEncoding(
+            encoder: aacEncoder,
+            bitrate: AudioMode.aacBitrate(base: AudioMode.defaultAACBitrate, channels: targetChannels),
+            channels: targetChannels
+        )
+        return AudioDecision(plan: .encode(encoding), note: copyFallbackNote(layout: layout, encoding: encoding))
+
+    case .aac(let bitrate):
+        let encoding = AACEncoding(
+            encoder: aacEncoder,
+            bitrate: AudioMode.aacBitrate(base: bitrate, channels: targetChannels ?? audio.channels),
+            channels: targetChannels
+        )
+        var note: String?
+        if let layout, layout.hasLayoutChange {
+            note = layoutChangeDescription(layout)
+                + "全体を\(encoding.displayName)で変換する。"
+                + paddingNote(layout: layout, encoding: encoding)
+        }
+        return AudioDecision(plan: .encode(encoding), note: note)
+    }
+}
+
+private func copyFallbackNote(layout: AudioLayoutReport, encoding: AACEncoding) -> String {
+    guard layout.hasLayoutChange else {
+        return "二か国語（デュアルモノ）の音声はコピーすると Apple 製のアプリで再生できないため、\(encoding.displayName)に変換する。主音声が左、副音声が右に入る。"
+    }
+    var note = layoutChangeDescription(layout)
+        + "コピーすると切り替え以降が再生できなくなるため、\(encoding.displayName)に変換する。"
+        + paddingNote(layout: layout, encoding: encoding)
+    if layout.hasDualMono {
+        note += "二か国語の区間は、主音声が左、副音声が右に入る。"
+    }
+    return note
+}
+
+private func layoutChangeDescription(_ layout: AudioLayoutReport) -> String {
+    let layouts = layout.distinctLayouts
+    let names = layouts.map(\.displayName)
+    // チャンネル数が同じでサンプリング周波数などだけが変わるときは、名前では区別できない。
+    guard Set(names).count == layouts.count else {
+        return "音声の形式（サンプリング周波数など）が途中で変わる（切り替え \(layout.switchCount) 回）。"
+    }
+    return "音声のチャンネル構成が途中で変わる（\(names.joined(separator: "・"))、切り替え \(layout.switchCount) 回）。"
+}
+
+/// ステレオの区間を 5.1ch で変換すると、前方の左右に入り、残りのチャンネルは無音になる。
+/// モノラルの区間をステレオで変換すると左右に同じ音が入るので、無音になるとは書かない。
+private func paddingNote(layout: AudioLayoutReport, encoding: AACEncoding) -> String {
+    guard let target = encoding.channels, target > 2,
+          layout.segments.contains(where: { segment in
+              guard let channels = segment.channels else { return false }
+              return channels == 2 && channels < target
+          }) else { return "" }
+    return "ステレオの区間は前方の左右に入り、残りのチャンネルは無音になる。"
+}
+
+// MARK: - ffmpeg の引数
 
 /// `MediaInfo` と `EncodeSettings` から ffmpeg の引数配列を組み立てる。
 /// 副作用を持たない純粋関数にしてあるので、ffmpeg を起動せずにユニットテストできる。
-func makeArguments(input: MediaInfo, output: URL, settings: EncodeSettings) -> [String] {
+///
+/// `audio` は `makeAudioPlan` で決めた音声の扱い。省略すると、変換前の走査をしなかったものとして
+/// 設定どおりに扱う（エンコーダは ffmpeg 内蔵の aac）。
+func makeArguments(input: MediaInfo, output: URL, settings: EncodeSettings, audio: AudioPlan? = nil) -> [String] {
+    let audio = audio ?? makeAudioPlan(input: input, settings: settings, layout: nil, aacEncoder: "aac").plan
+
     var arguments: [String] = ["-hide_banner", "-nostdin", "-y"]
 
     // -fflags は入力オプションなので -i より前に置く。.ts のタイムスタンプ不連続への対処。
@@ -228,7 +365,7 @@ func makeArguments(input: MediaInfo, output: URL, settings: EncodeSettings) -> [
     arguments += ["-i", input.url.path]
 
     let hasVideo = input.primaryVideo != nil
-    let hasAudio = input.primaryAudio != nil && settings.audioMode != .none
+    let hasAudio = input.primaryAudio != nil && audio != .omit
 
     if hasVideo { arguments += ["-map", "0:v:0"] }
     if hasAudio { arguments += ["-map", "0:a:0"] }
@@ -241,8 +378,8 @@ func makeArguments(input: MediaInfo, output: URL, settings: EncodeSettings) -> [
     }
 
     if hasAudio {
-        arguments += audioArguments(settings: settings)
-        if needsAACBitstreamFilter(input: input, settings: settings) {
+        arguments += audioArguments(audio)
+        if needsAACBitstreamFilter(input: input, settings: settings, audio: audio) {
             arguments += ["-bsf:a", "aac_adtstoasc"]
         }
     }
@@ -295,21 +432,31 @@ private func deinterlaceFilter(input: MediaInfo, settings: EncodeSettings) -> St
     }
 }
 
-private func audioArguments(settings: EncodeSettings) -> [String] {
-    switch settings.audioMode {
+private func audioArguments(_ audio: AudioPlan) -> [String] {
+    switch audio {
     case .copy:
         return ["-c:a", "copy"]
-    case .aac(let bitrate):
-        return ["-c:a", "aac", "-b:a", "\(bitrate)k"]
-    case .none:
+    case .encode(let encoding):
+        // 受信エラーなどで復号できなかったフレームは捨てられ、MP4 には長い duration の穴として残る。
+        // AVFoundation はこの穴を詰めて鳴らすので、その分だけ音声が映像より先に進む。
+        // タイムスタンプに合わせて無音を補い、同期を保つ。
+        var arguments = ["-af", "aresample=async=1"]
+        arguments += ["-c:a", encoding.encoder, "-b:a", "\(encoding.bitrate)k"]
+        // aac_at は "5.1" というレイアウト名を受け付けない（"5.1(side)" なら通る）ので、
+        // 名前ではなくチャンネル数で指定し、レイアウトの選択は ffmpeg に任せる。
+        if let channels = encoding.channels {
+            arguments += ["-ac", String(channels)]
+        }
+        return arguments
+    case .omit:
         return []
     }
 }
 
 /// .ts から MP4 / MOV へ音声をコピーする場合に必要なビットストリームフィルタか。
 /// 近年の ffmpeg は自動で付けるが、明示しておく。
-private func needsAACBitstreamFilter(input: MediaInfo, settings: EncodeSettings) -> Bool {
-    guard settings.audioMode == .copy else { return false }
+private func needsAACBitstreamFilter(input: MediaInfo, settings: EncodeSettings, audio: AudioPlan) -> Bool {
+    guard audio == .copy else { return false }
     guard settings.container.isQuickTimeFamily else { return false }
-    return mpegTransportStreamExtensions.contains(input.url.pathExtension.lowercased())
+    return input.isMPEGTransportStream
 }

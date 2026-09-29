@@ -10,6 +10,8 @@ final class ConversionQueue {
 
     enum ItemStatus: Equatable {
         case waiting
+        /// 変換の前に、音声のチャンネル構成が途中で変わらないかを調べている。
+        case checkingAudio
         case running(EncodeProgress?)
         case finished(URL)
         case skipped(String)
@@ -24,7 +26,7 @@ final class ConversionQueue {
         var isSettled: Bool {
             switch self {
             case .finished, .skipped, .failed, .cancelled: return true
-            case .waiting, .running: return false
+            case .waiting, .checkingAudio, .running: return false
             }
         }
     }
@@ -32,6 +34,8 @@ final class ConversionQueue {
     struct Item: Identifiable {
         let info: MediaInfo
         var status: ItemStatus = .waiting
+        /// 音声を設定と違う扱いにしたときの説明（構成の切り替えを見つけて AAC に変換した、など）。
+        var audioNote: String?
 
         var id: MediaInfo.ID { info.id }
     }
@@ -216,7 +220,10 @@ final class ConversionQueue {
     @MainActor
     func requeue(_ id: MediaInfo.ID) {
         guard let current = item(for: id), current.status.isSettled else { return }
-        update(id) { $0.status = .waiting }
+        update(id) {
+            $0.status = .waiting
+            $0.audioNote = nil
+        }
     }
 
     // MARK: - 変換の実行
@@ -248,17 +255,48 @@ final class ConversionQueue {
             }
         }
 
-        update(id) { $0.status = .running(nil) }
-
         let settings = encodeSettings
+        let info = item.info
+        let needsAudioScan = AudioLayoutScanner.needsScan(input: info, settings: settings)
+        update(id) {
+            $0.status = needsAudioScan ? .checkingAudio : .running(nil)
+            $0.audioNote = nil
+        }
+
         let relay = ProgressRelay { [weak self] progress in
             // 進捗更新の途中でキャンセルや削除が挟まっても、古い状態で上書きしない。
             guard let self, self.item(for: id)?.status.isRunning == true else { return }
             self.update(id) { $0.status = .running(progress) }
         }
 
-        let task = Task<Void, Error> {
-            try await FFmpegRunner().encode(input: item.info, output: output, settings: settings) { progress in
+        let task = Task<Void, Error> { [weak self] in
+            // 走査もこのタスクの中で行う。停止やキャンセルをすると、走査中の ffmpeg も止まる。
+            let layout: AudioLayoutReport? = if needsAudioScan {
+                try await AudioLayoutScanner().scan(info)
+            } else {
+                nil
+            }
+            try layout?.checkConvertible(fileName: info.fileName)
+
+            let runner = FFmpegRunner()
+            let aacEncoder = if settings.audioMode == .none {
+                "aac"
+            } else {
+                try await runner.preferredAACEncoder()
+            }
+            let decision = makeAudioPlan(input: info, settings: settings, layout: layout, aacEncoder: aacEncoder)
+
+            #if DEBUG
+            if let note = decision.note { print("[audio] \(info.fileName): \(note)") }
+            #endif
+
+            try Task.checkCancellation()
+            self?.update(id) {
+                $0.status = .running(nil)
+                $0.audioNote = decision.note
+            }
+
+            try await runner.encode(input: info, output: output, settings: settings, audio: decision.plan) { progress in
                 relay.report(progress)
             }
         }
@@ -332,6 +370,8 @@ extension ConversionQueue.ItemStatus {
         switch self {
         case .waiting:
             return "待機中"
+        case .checkingAudio:
+            return "音声を確認中"
         case .running(let progress):
             guard let fraction = progress?.fraction else { return "変換中" }
             return String(format: "変換中 %.0f%%", fraction * 100)
@@ -349,6 +389,7 @@ extension ConversionQueue.ItemStatus {
     var symbolName: String {
         switch self {
         case .waiting:   return "clock"
+        case .checkingAudio: return "waveform"
         case .running:   return "arrow.triangle.2.circlepath"
         case .finished:  return "checkmark.circle.fill"
         case .skipped:   return "forward.end.circle"

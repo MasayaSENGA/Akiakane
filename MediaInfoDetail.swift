@@ -154,13 +154,22 @@ struct ConversionSection: View {
                     Button("このファイルを外す") { queue.cancel(item.id) }
                 }
 
+            case .checkingAudio:
+                ProgressView()
+                Text("変換の前に、音声のチャンネル構成が途中で変わらないかを調べている。ファイル全体を読むので、HDD や NAS 上のファイルでは数分かかる。")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Button("このファイルの変換をキャンセル") { queue.cancel(item.id) }
+
             case .running(let progress):
                 progressView(progress)
+                audioNoteCallout
                 Button("このファイルの変換をキャンセル") { queue.cancel(item.id) }
 
             case .finished(let url):
                 Callout(symbol: "checkmark.circle.fill", tint: .green,
                         text: "変換が完了しました: \(url.path)")
+                audioNoteCallout
                 HStack {
                     Button("Finder で表示") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
                     Button("もう一度変換する") { queue.requeue(item.id) }
@@ -179,6 +188,13 @@ struct ConversionSection: View {
                         text: "キャンセルしました。このファイルは変換されていません。")
                 Button("待機に戻す") { queue.requeue(item.id) }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var audioNoteCallout: some View {
+        if let note = item.audioNote {
+            Callout(symbol: "waveform", tint: .blue, text: note)
         }
     }
 

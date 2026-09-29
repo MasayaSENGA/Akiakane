@@ -147,17 +147,40 @@ struct FFmpegRunner {
         self.executableURL = executableURL
     }
 
+    /// AAC に変換するときのエンコーダを選ぶ。Apple の AudioToolbox（aac_at）が使えればそちらを優先する。
+    /// 同じビットレートなら ffmpeg 内蔵の aac より音質が良い。Homebrew 版には入っているが、
+    /// 別のビルドを指定された場合に備えて実際に問い合わせる。結果は実行ファイルごとに覚えておく。
+    func preferredAACEncoder() async throws -> String {
+        let executable = try executableURL ?? FFToolLocator.require(.ffmpeg)
+        if let cached = Self.aacEncoderCache[executable.path] { return cached }
+
+        let arguments = ["-hide_banner", "-h", "encoder=aac_at"]
+        #if DEBUG
+        print("[ffmpeg] " + ProcessRunner.commandLine(executable: executable, arguments: arguments))
+        #endif
+        let result = try await ProcessRunner.run(executable: executable, arguments: arguments)
+
+        // 存在しないエンコーダを問い合わせても終了コードは 0 なので、出力の見出しで判定する。
+        let encoder = result.stdoutText.contains("Encoder aac_at") ? "aac_at" : "aac"
+        Self.aacEncoderCache[executable.path] = encoder
+        return encoder
+    }
+
+    private static var aacEncoderCache: [String: String] = [:]
+
     /// 1ファイルを変換する。`Task` をキャンセルすると ffmpeg を停止し、
     /// 書きかけの出力ファイルを削除してから `CancellationError` を投げる。
+    /// `audio` は `makeAudioPlan` で決めた音声の扱い。
     func encode(
         input: MediaInfo,
         output: URL,
         settings: EncodeSettings,
+        audio: AudioPlan,
         onProgress: @escaping @Sendable (EncodeProgress) -> Void
     ) async throws {
         let executable = try executableURL ?? FFToolLocator.require(.ffmpeg)
         let partialOutput = output.appendingPathExtension("partial")
-        let arguments = makeArguments(input: input, output: partialOutput, settings: settings)
+        let arguments = makeArguments(input: input, output: partialOutput, settings: settings, audio: audio)
 
         #if DEBUG
         print("[ffmpeg] " + ProcessRunner.commandLine(executable: executable, arguments: arguments))

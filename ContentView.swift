@@ -137,7 +137,7 @@ struct ContentView: View {
         switch item.status {
         case .waiting:
             Button("このファイルを外す") { queue.cancel(item.id) }
-        case .running:
+        case .checkingAudio, .running:
             Button("変換をキャンセル") { queue.cancel(item.id) }
         case .finished(let url):
             Button("Finder で表示") { NSWorkspace.shared.activateFileViewerSelecting([url]) }
@@ -287,6 +287,9 @@ struct QueueRow: View {
                         ProgressView()
                             .controlSize(.small)
                     }
+                } else if item.status == .checkingAudio {
+                    ProgressView()
+                        .controlSize(.small)
                 }
 
                 Text(subtitle)
@@ -302,6 +305,8 @@ struct QueueRow: View {
         switch item.status {
         case .waiting:
             return "\(item.info.durationText) · \(item.info.fileSizeText)"
+        case .checkingAudio:
+            return item.status.shortText
         case .running(let progress):
             var parts = [item.status.shortText]
             if let speed = progress?.speed { parts.append(String(format: "%.2fx", speed)) }
@@ -319,6 +324,7 @@ struct QueueRow: View {
     private var tint: Color {
         switch item.status {
         case .waiting:   return .secondary
+        case .checkingAudio: return .accentColor
         case .running:   return .accentColor
         case .finished:  return .green
         case .skipped:   return .secondary

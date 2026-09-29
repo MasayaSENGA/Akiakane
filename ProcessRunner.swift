@@ -183,9 +183,31 @@ enum ProcessRunner {
         arguments: [String],
         onStandardOutputLine: @escaping @Sendable (String) -> Void
     ) async throws -> ProcessResult {
+        let lineSplitter = LineSplitter(onLine: onStandardOutputLine)
+        return try await runStreamingData(
+            executable: executable,
+            arguments: arguments,
+            onStandardOutput: { lineSplitter.append($0) },
+            onEndOfStandardOutput: { lineSplitter.flushRemainder() }
+        )
+    }
+
+    /// プロセスを起動し、標準出力をバイト列のまま、読めた分ずつコールバックしながら実行する。
+    ///
+    /// 音声のビットストリームのような大きなバイナリを、全部メモリに溜めずに流し読みするために使う。
+    /// キャンセルと標準エラーの扱いは `runStreaming(executable:arguments:onStandardOutputLine:)` と同じ。
+    /// `onEndOfStandardOutput` は標準出力が閉じたときに1回だけ呼ばれる。
+    static func runStreamingData(
+        executable: URL,
+        arguments: [String],
+        onStandardOutput: @escaping @Sendable (Data) -> Void,
+        onEndOfStandardOutput: @escaping @Sendable () -> Void = {}
+    ) async throws -> ProcessResult {
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
             throw ProcessRunnerError.notExecutable(executable)
         }
+        // 既にキャンセルされていれば、プロセスを起動しない。
+        try Task.checkCancellation()
 
         let process = Process()
         process.executableURL = executable
@@ -198,7 +220,6 @@ enum ProcessRunner {
         process.standardError = stderrPipe
 
         let collector = OutputCollector()
-        let lineSplitter = LineSplitter(onLine: onStandardOutputLine)
         let group = DispatchGroup()
 
         group.enter()
@@ -206,10 +227,10 @@ enum ProcessRunner {
             let chunk = handle.availableData
             if chunk.isEmpty {
                 handle.readabilityHandler = nil
-                lineSplitter.flushRemainder()
+                onEndOfStandardOutput()
                 group.leave()
             } else {
-                lineSplitter.append(chunk)
+                onStandardOutput(chunk)
             }
         }
 
@@ -236,21 +257,17 @@ enum ProcessRunner {
             throw ProcessRunnerError.launchFailed(executable, underlying: error)
         }
 
-        return try await withTaskCancellationHandler(
+        let result = await withTaskCancellationHandler(
             operation: {
-                try await withCheckedThrowingContinuation { continuation in
+                await withCheckedContinuation { continuation in
                     group.notify(queue: .global(qos: .userInitiated)) {
-                        if Task.isCancelled {
-                            continuation.resume(throwing: CancellationError())
-                        } else {
-                            continuation.resume(
-                                returning: ProcessResult(
-                                    terminationStatus: process.terminationStatus,
-                                    standardOutput: Data(),
-                                    standardError: collector.standardError
-                                )
+                        continuation.resume(
+                            returning: ProcessResult(
+                                terminationStatus: process.terminationStatus,
+                                standardOutput: Data(),
+                                standardError: collector.standardError
                             )
-                        }
+                        )
                     }
                 }
             },
@@ -258,6 +275,13 @@ enum ProcessRunner {
                 process.terminate()
             }
         )
+
+        // notify のクロージャは Swift のタスクの外（GCD のキュー）で動くため、そこで
+        // Task.isCancelled を見ても常に false になる。プロセスの終了を待ったあと、
+        // タスクに戻ってから確認する。ffmpeg は SIGTERM を受けると終了コード 255 で終わるので、
+        // ここで確認しないとキャンセルが「失敗」として扱われる。
+        try Task.checkCancellation()
+        return result
     }
 
     /// デバッグ用に、実行するコマンドを 1 行の文字列にする。
