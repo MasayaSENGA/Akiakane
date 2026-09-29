@@ -135,7 +135,7 @@ xcodebuild -project Akiakane.xcodeproj -scheme Akiakane -configuration Release -
 ditto build/Build/Products/Release/Akiakane.app /Applications/Akiakane.app
 ```
 
-コードを更新したら同じコマンドで上書きする。`build/` は `.gitignore` で除外している。
+コードを更新したら、アプリを終了してから、古い .app をゴミ箱に入れて同じコマンドでコピーし直す。`ditto` は既存の .app に中身を足し合わせるので、上から重ねると古いファイルがバンドルに残る。`build/` は `.gitignore` で除外している。設定（変換設定と ffmpeg のパス）は .app の外に保存されているので、置き換えても引き継がれる。
 別の Mac にコピーした場合は未署名扱いになるため、初回は「システム設定 → プライバシーとセキュリティ → このまま開く」が必要になる。
 
 テスト用のインターレース素材は次のコマンドで作れる。
