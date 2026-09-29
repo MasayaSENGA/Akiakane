@@ -52,6 +52,7 @@ Xcode を開いて手で確認してもらうのは最後の実行確認だけ�
 | `FFmpegRunner.swift` | ffmpeg の実行と `-progress` のパース、AAC エンコーダ（`aac_at` / `aac`）の選択 | 完成 |
 | `ProcessRunner.swift` | 外部プロセスを async で実行する基盤（一括版と、行単位・バイト列のストリーミング版） | 完成 |
 | `FFToolLocator.swift` | ffmpeg / ffprobe のパス解決 | 完成 |
+| `OrphanedFFmpeg.swift` | 変換中の ffmpeg の記録と、異常終了後に取り残された ffmpeg の後始末 | 完成 |
 | `FFProbeReport.swift` | ffprobe の JSON デコード用 | 完成 |
 | `MediaInfo.swift` | アプリが扱うメタデータのドメインモデル | 完成 |
 | `FFProbeRunner.swift` | ffprobe 実行、および入力ファイルの収集 | 完成 |
@@ -88,8 +89,28 @@ xcodebuild -project Akiakane.xcodeproj -scheme Akiakane -configuration Debug tes
   大量ドロップ時にプロセスが一気に増えるのを避けるため。
 - **ffmpeg も1本ずつ順に実行する。**
   libx265 はそれ自体でコアを使い切るので並列にしても総時間は縮まらず、1本ずつのほうが完了ファイルが早く得られる。
-- **出力は `<最終名>.partial` に書き、成功後にリネームする。そのため `-f mp4` などコンテナ形式を必ず明示する。**
+- **出力は `<最終名>.<実行ごとの8文字>.partial` に書き、成功後にリネームする。そのため `-f mp4` などコンテナ形式を必ず明示する。**
   ffmpeg は拡張子から形式を推定するので、`.partial` 名のままだと起動時に「Unable to choose an output format」で失敗する。
+  名前を固定にすると、アプリの異常終了で取り残された ffmpeg と、再起動後の同じファイルの変換が同じ `.partial` に書き込み、壊れた出力が「完了」になった。
+- **動いている ffmpeg を UserDefaults に記録し、次の起動時に、持ち主のアプリがもう動いていなければ止める（`OrphanedFFmpeg`）。**
+  ffmpeg は親が死んでも止まらない（SIGPIPE を無視し、進捗を書けなくても続ける）。記録には ffmpeg と持ち主のアプリの PID と開始時刻を残す。
+  PID は再利用されるので開始時刻でも照合する。持ち主を見ないと、Release 版の変換中に Debug 版を起動したときや、並列に動くテストのほかのプロセスの ffmpeg を止めてしまう（実際にテストで起きた）。
+- **実行するコマンドは `ProcessRunner` が起動の直前に、`~/Library/Logs/Akiakane/commands.log`（`CommandLogFile`）と `os.Logger`（サブシステムはバンドル ID、カテゴリ command）へ残す。**
+  `#if DEBUG` の `print` だけでは、README の手順で入れる Release 版ではまったく残らなかった。`Process` を直接使わず、必ず `ProcessRunner` を通す。
+  統合ログは1件あたり約 1KB で切り詰めるので、全文はファイルに書く（長い番組名と深い NAS のパスで末尾が消えた）。
+  `commandLine` は、シェルで意味を持つ文字を含む引数をシングルクォートで囲む。放送録画のファイル名によくある `[字]` は zsh のグロブになるため、空白だけのクォートでは再現できなかった。
+- **音声をコピーする設定でも、出力の形式に入らないコーデックや、入れても Apple 製アプリで鳴らないコーデックは変換する（`Container.canCopyAudio` / `losslessPCMCodec`）。**
+  wmav2・pcm_u8・adpcm_ima_wav などを MP4 にコピーすると、ffmpeg は起動直後に失敗する。MP3 は MP4 に書けても、AVFoundation が音声トラックごと無視する（MOV なら鳴る）。
+  MKV も Blu-ray / DVD / 放送の LPCM（pcm_bluray / pcm_dvd / s302m）は書けないので、MOV / MKV ではこれらを無劣化の pcm_s24le に、MP4 では AAC にする。
+  `aac_adtstoasc` は TS の AAC にだけ付ける。AVCHD の AC-3 などに付けると失敗する。TS の AC-3 を MOV にコピーするときは `-tag:a ac-3` を付ける（既定の `AC-3` では Apple 製アプリで鳴らない）。
+- **AAC に変換するときは、チャンネル数を必ず `-ac` で明示する。8ch は内蔵の `aac`、48 kHz を超える音声は `-ar 48000` にする。**
+  `aac_at` はレイアウトの交渉で 7.1ch を 7.0（LFE を捨てる）、2.1ch をステレオに落とす。`-ac 8` を渡すとチャンネルの割り当てが崩れるので、7.1ch には使えない。
+  `aac_at` は 96 / 192 kHz を受け付けず、起動直後に失敗する（'fmt?'）。
+- **フォルダの走査では、パッケージのうち AVCHD / BDMV（`public.audiovisual-content-collection` に適合するもの）の中には入る。**
+  macOS はこれらをパッケージとして扱うので、`.skipsPackageDescendants` ではビデオカメラの SD カードをドロップしても1本も拾えなかった。
+- **ffprobe の解析は、キューに1本だけあるループで順に行う。**
+  ドロップのたびに解析のタスクを作ると、続けてドロップしたときに ffprobe が並列に走り、同じファイルが二重に登録された。
+- **出力先を決めるとき、キューのほかの項目の入力と、このバッチで書き出した出力は予約済みとして扱い、「上書きする」でも別名にする（`makeOutputPlan` の `isReserved`）。**
 - **プロジェクトの既定 actor 分離は MainActor（`SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`）。**
   パイプの読み取りスレッドから呼ばれるクラス（`LineSplitter`、`OutputCollector`、`FFmpegProgressAccumulator`、`ProgressRelay`、`ADTSLayoutParser` など）は
   `nonisolated` を明示する。付けないと「main actor-isolated ... in a synchronous nonisolated context」の警告が出る。
@@ -134,7 +155,7 @@ xcodebuild -project Akiakane.xcodeproj -scheme Akiakane -configuration Debug tes
 - UI の状態を持つクラスは `@Observable`。UI を触るメソッドには `@MainActor` を付ける。クラス全体を `@MainActor` にはしない（`@State` の初期化で問題が出るため）。
 - エラーは `LocalizedError` に準拠させ、`errorDescription` に何が起きたか、`recoverySuggestion` にどうすれば直るかを書く。「エラーが発生しました」で終わらせない。
 - **実行した ffmpeg / ffprobe のコマンドは必ず全文をログに残す。**
-  GUI で組んだ設定がどのコマンドになったかを確認して、ターミナルで再現できることが重要。`ProcessRunner.commandLine(executable:arguments:)` を使う。
+  GUI で組んだ設定がどのコマンドになったかを確認して、ターミナルで再現できることが重要。`ProcessRunner` で起動すれば、`ProcessRunner.logCommand` が自動で残す。
 - UI の文言は能動態・常体で短く。ボタンは何が起きるかを書く（「実行」ではなく「変換を開始」）。
 
 ## やらないこと

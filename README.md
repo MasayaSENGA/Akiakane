@@ -28,12 +28,14 @@ Xcode で `Akiakane` スキームを選んで Run する。Signing はローカ�
 
 ## できること
 
-- ファイルやフォルダをドロップすると、ffprobe でメタデータを読み取ってキューに並べる
+- ファイルやフォルダをドロップすると、ffprobe でメタデータを読み取ってキューに並べる。ビデオカメラの AVCHD や Blu-ray の BDMV のフォルダも、中の .MTS / .m2ts を拾う
 - 「変換を開始」で、待機中のファイルを上から順に1本ずつ変換する
 - 進捗率、速度、推定残り時間、出力サイズをリアルタイムに表示する
-- 途中で停止・個別キャンセルができる。書きかけの出力は残らない
+- 途中で停止・個別キャンセルができる。書きかけの出力は残らない。「停止」で中断したファイルは待機に戻り、再開すると変換される
+- 変換中のファイルをリストから外すときは、確認してから止める
 - 失敗・キャンセルしたファイルは待機に戻して再実行できる
 - 変換中は Mac のスリープを抑止する
+- アプリが変換の途中で異常終了した場合（強制終了や Xcode の Stop）、ffmpeg は止まらずに動き続ける。次に起動したとき、取り残された ffmpeg を止め、書きかけのファイルを削除する
 
 ### 変換設定（ウインドウ右のパネル）
 
@@ -52,7 +54,13 @@ Xcode で `Akiakane` スキームを選んで Run する。Signing はローカ�
 
 ### ffmpeg のコマンド
 
-実行した ffmpeg / ffprobe のコマンドは全文が Xcode のコンソールに出る。GUI の設定がどのコマンドになったかを確認し、ターミナルにそのまま貼って再現できる。
+実行した ffmpeg / ffprobe のコマンドは、全文を `~/Library/Logs/Akiakane/commands.log` に追記する（Release 版でも残る）。GUI の設定がどのコマンドになったかを確認し、コマンドの行をターミナルにそのまま貼って再現できる。ファイル名に `[字]` や空白、`$` などが入っていても再現できるよう、必要な引数はシングルクォートで囲む。
+
+```bash
+tail -n 20 ~/Library/Logs/Akiakane/commands.log
+```
+
+同じ内容は macOS の統合ログにも残る（Console.app でサブシステム `Nana.Akiakane` に絞り込む、または `log show --predicate 'subsystem == "Nana.Akiakane"' --last 1h`）。ただし統合ログは1件あたり約 1KB で切り詰めるので、長いパスのコマンドは末尾が欠ける。全文はファイルのほうを見る。Xcode から実行した場合は、Xcode のコンソールにも出る。
 
 `.ts` を MP4 に変換するときの既定の形は次のとおり。
 
@@ -63,13 +71,22 @@ ffmpeg -hide_banner -nostdin -y -fflags +genpts -i input.ts \
   -vf bwdif=mode=send_frame:parity=auto:deint=interlaced \
   -c:a copy -bsf:a aac_adtstoasc \
   -tag:v hvc1 -movflags +faststart \
-  -progress pipe:1 -nostats -loglevel error -f mp4 input_h265.mp4.partial
+  -progress pipe:1 -nostats -loglevel error -f mp4 input_h265.mp4.1a2b3c4d.partial
 ```
 
 - `-map` は ffprobe で解析した映像・音声を、ストリームの番号で指定する（例は映像が 0 番、音声が 1 番の場合）。カバーアートなどの静止画は映像として数えない
-- `-tag:v hvc1` がないと QuickTime や Apple 製デバイスで HEVC が再生できない
-- 出力は `.partial` 名で書き、成功後にリネームする。そのため `-f` でコンテナ形式を明示している
-- インターレース解除は ffprobe の `field_order` を見て判断する。取れない素材は、インターレースとマークされたフレームだけを解除する
+- `-tag:v hvc1` がないと QuickTime や Apple 製デバイスで HEVC が再生できない。HEVC の素材を映像コピーで詰め替えるときも付ける
+- 出力は `<最終名>.<実行ごとの8文字>.partial` で書き、成功後にリネームする。そのため `-f` でコンテナ形式を明示している。名前を実行ごとに変えるのは、取り残された ffmpeg と次の変換が同じファイルに書き込まないようにするため
+- インターレース解除は ffprobe の `field_order` を見て判断する。取れない素材は、インターレースとマークされたフレームだけを解除する。「常に解除する」では、マークのないフレームも含めてすべて解除する（`deint=all`）
+- 音声を「コピー」にしていても、出力の形式に入らない音声や、入れても Apple 製アプリで鳴らない音声は変換する
+  - MP4 にそのままコピーするのは AAC・AC-3・E-AC-3・ALAC だけ。MP3 は MP4 に入れると Apple 製アプリが音声ごと無視するので、MP4 では AAC にする
+  - MOV は MP3 と PCM もコピーする。MKV はほぼすべてコピーする
+  - Blu-ray / DVD / 放送の LPCM は、MOV / MKV では無劣化の 24 bit PCM に、MP4 では AAC にする
+  - それ以外（WMV の wmav2、古いデジカメの AVI の pcm_u8 / IMA ADPCM、mp2、DTS など）は AAC にする
+- AAC にするときは、元のチャンネル数を必ず `-ac` で指定する（Apple のエンコーダ `aac_at` は、指定しないと 7.1ch を 7.0 に、2.1ch をステレオに落とす）。7.1ch は `aac_at` が扱えないので、ffmpeg 内蔵の `aac` にする。48 kHz を超える音声（96 / 192 kHz）は、`aac_at` が受け付けないので 48 kHz にする
+- TS の AC-3 を MOV にコピーするときは `-tag:a ac-3` を付ける。付けないと ffmpeg がタグを `AC-3` にし、Apple 製アプリで鳴らない
+- `-bsf:a aac_adtstoasc` は、TS の AAC をコピーするときだけ付ける。AVCHD の AC-3 などに付けると ffmpeg が失敗する
+- 同じバッチの中で出力先が重なるとき（別のフォルダの同名の録画を1つの保存先にまとめる、`番組.ts` と `番組.mp4` を接尾辞なしで変換する、など）は、「上書きする」の設定でも、先に変換した結果やほかの項目の元ファイルを上書きせず、別名にする
 - 入力が途中で読めなくなった場合（NAS の切断など）、ffmpeg は途中までの出力を確定させて正常終了する。アプリは標準エラーの `Error during demuxing` を見て失敗とし、途中までの出力は残さない
 - 出力先が入力ファイルそのものになる場合は、ファイル名に `_h265` を付ける。macOS は既定でファイル名の大文字小文字を区別しないので、`CLIP.MP4` と `CLIP.mp4` も同じファイルとして扱う
 

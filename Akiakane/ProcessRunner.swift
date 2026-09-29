@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 /// 外部プロセスの実行結果。
 struct ProcessResult: Sendable {
@@ -111,6 +112,7 @@ enum ProcessRunner {
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
             throw ProcessRunnerError.notExecutable(executable)
         }
+        logCommand(executable: executable, arguments: arguments)
 
         let process = Process()
         process.executableURL = executable
@@ -181,12 +183,14 @@ enum ProcessRunner {
     static func runStreaming(
         executable: URL,
         arguments: [String],
+        onLaunch: (Int32) -> Void = { _ in },
         onStandardOutputLine: @escaping @Sendable (String) -> Void
     ) async throws -> ProcessResult {
         let lineSplitter = LineSplitter(onLine: onStandardOutputLine)
         return try await runStreamingData(
             executable: executable,
             arguments: arguments,
+            onLaunch: onLaunch,
             onStandardOutput: { lineSplitter.append($0) },
             onEndOfStandardOutput: { lineSplitter.flushRemainder() }
         )
@@ -197,15 +201,18 @@ enum ProcessRunner {
     /// 音声のビットストリームのような大きなバイナリを、全部メモリに溜めずに流し読みするために使う。
     /// キャンセルと標準エラーの扱いは `runStreaming(executable:arguments:onStandardOutputLine:)` と同じ。
     /// `onEndOfStandardOutput` は標準出力が閉じたときに1回だけ呼ばれる。
+    /// `onLaunch` は起動した直後に、プロセス ID を渡して呼ばれる。
     static func runStreamingData(
         executable: URL,
         arguments: [String],
+        onLaunch: (Int32) -> Void = { _ in },
         onStandardOutput: @escaping @Sendable (Data) -> Void,
         onEndOfStandardOutput: @escaping @Sendable () -> Void = {}
     ) async throws -> ProcessResult {
         guard FileManager.default.isExecutableFile(atPath: executable.path) else {
             throw ProcessRunnerError.notExecutable(executable)
         }
+        logCommand(executable: executable, arguments: arguments)
         // 既にキャンセルされていれば、プロセスを起動しない。
         try Task.checkCancellation()
 
@@ -256,6 +263,7 @@ enum ProcessRunner {
             process.terminationHandler = nil
             throw ProcessRunnerError.launchFailed(executable, underlying: error)
         }
+        onLaunch(process.processIdentifier)
 
         let result = await withTaskCancellationHandler(
             operation: {
@@ -284,12 +292,71 @@ enum ProcessRunner {
         return result
     }
 
-    /// デバッグ用に、実行するコマンドを 1 行の文字列にする。
-    /// ターミナルへそのまま貼って再現できるよう、空白を含む引数はクォートする。
+    /// 実行したコマンドを残すロガー。Release 版でも Console.app や `log show` で見られる。
+    nonisolated static let commandLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Akiakane", category: "command")
+
+    /// 実行するコマンドの全文をログに残す。GUI で組んだ設定がどのコマンドになったかを確かめ、
+    /// ターミナルで再現できるようにするため、プロセスを起動する前に必ず呼ぶ。
+    /// 統合ログは1件あたり約 1KB で切り詰めるので、全文は `CommandLogFile` にも書く。
+    static func logCommand(executable: URL, arguments: [String]) {
+        let line = commandLine(executable: executable, arguments: arguments)
+        commandLogger.notice("\(line, privacy: .public)")
+        CommandLogFile.append(line)
+    }
+
+    /// 実行するコマンドを 1 行の文字列にする。zsh / bash にそのまま貼って再現できるよう、必要な引数をクォートする。
     static func commandLine(executable: URL, arguments: [String]) -> String {
-        let quoted = arguments.map { arg -> String in
-            arg.contains(" ") ? "\"\(arg)\"" : arg
+        ([executable.path] + arguments).map(shellQuoted).joined(separator: " ")
+    }
+
+    /// シェルで特別な意味を持つ文字を含む引数を、シングルクォートで囲む。
+    ///
+    /// 放送録画のファイル名によくある `[字]` は zsh のグロブになり、`$` や `` ` `` は展開される。
+    /// シングルクォートの中では何も展開されないので、引数に含まれる `'` だけを `'\''` に置き換える。
+    /// 日本語などの ASCII 以外の文字も、念のためクォートする。
+    nonisolated static func shellQuoted(_ argument: String) -> String {
+        let safe = Set("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_@%+=:,./-".unicodeScalars)
+        // `=` で始まる語は zsh が実行ファイルのパスに展開する（EQUALS オプション）。
+        if !argument.isEmpty, !argument.hasPrefix("="), argument.unicodeScalars.allSatisfy(safe.contains) {
+            return argument
         }
-        return ([executable.path] + quoted).joined(separator: " ")
+        return "'" + argument.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}
+
+/// 実行したコマンドの全文を `~/Library/Logs/Akiakane/commands.log` に追記する。
+///
+/// 統合ログは1件あたり約 1KB で切り詰めるので、長い番組名や深い NAS のパスでは、出力先などの末尾が消えた。
+/// ファイルなら全文が残り、コマンドの行をそのままターミナルに貼れる。Console.app の「ログレポート」からも見られる。
+/// 同じアプリのほかのインスタンスと同時に書いても行が混ざらないよう、O_APPEND で1回の write で書く。
+nonisolated enum CommandLogFile {
+
+    static let url: URL? = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?
+        .appendingPathComponent("Logs/Akiakane/commands.log")
+
+    /// これを超えたら `commands.log.1` に移して、新しく書き始める。
+    private static let maxSize = 10 * 1024 * 1024
+    private static let lock = NSLock()
+
+    static func append(_ commandLine: String) {
+        guard let url else { return }
+        lock.lock()
+        defer { lock.unlock() }
+
+        let fileManager = FileManager.default
+        try? fileManager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let size = (try? fileManager.attributesOfItem(atPath: url.path))?[.size] as? Int, size > maxSize {
+            let previous = url.appendingPathExtension("1")
+            try? fileManager.removeItem(at: previous)
+            try? fileManager.moveItem(at: url, to: previous)
+        }
+
+        // 時刻は別の行にする。コマンドの行だけを選んで貼れるように。
+        let stamp = ISO8601DateFormatter.string(from: Date(), timeZone: .current, formatOptions: [.withInternetDateTime])
+        let entry = Data("[\(stamp)]\n\(commandLine)\n".utf8)
+        let descriptor = open(url.path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+        guard descriptor >= 0 else { return }
+        defer { close(descriptor) }
+        entry.withUnsafeBytes { _ = write(descriptor, $0.baseAddress, $0.count) }
     }
 }

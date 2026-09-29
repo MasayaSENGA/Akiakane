@@ -38,6 +38,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     let queue = ConversionQueue()
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // 前回アプリが変換の途中で異常終了していたら、取り残された ffmpeg を止める。
+        // 応答しない NAS 上の書きかけのファイルを消すときに起動を止めないよう、メインスレッドの外で行う。
+        Task.detached { OrphanedFFmpeg.cleanUpLeftovers() }
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard queue.isRunning else { return .terminateNow }
 

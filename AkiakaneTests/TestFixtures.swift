@@ -56,18 +56,21 @@ enum TestFixtures {
     ///   - includeAudio: 音声ストリームを含めるか。
     ///   - audioCodec: 音声のコーデック名。
     ///   - audioChannels: ffprobe が報告するチャンネル数（ファイル冒頭の構成）。
+    ///   - videoCodec: 映像のコーデック名。
     static func mediaInfo(
         url: URL,
         durationSeconds: Double? = 120,
         fieldOrder: String? = "progressive",
         includeAudio: Bool = true,
         audioCodec: String = "aac",
-        audioChannels: Int = 2
+        audioChannels: Int = 2,
+        audioSampleRate: Int = 48_000,
+        videoCodec: String = "h264"
     ) -> MediaInfo {
         var streams: [FFProbeReport.Stream] = [
             stream(
                 index: 0,
-                codecName: "hevc",
+                codecName: videoCodec,
                 codecType: "video",
                 width: 1920,
                 height: 1080,
@@ -83,7 +86,7 @@ enum TestFixtures {
                     index: 1,
                     codecName: audioCodec,
                     codecType: "audio",
-                    sampleRate: "48000",
+                    sampleRate: String(audioSampleRate),
                     channels: audioChannels,
                     channelLayout: audioChannels == 6 ? "5.1" : "stereo"
                 )

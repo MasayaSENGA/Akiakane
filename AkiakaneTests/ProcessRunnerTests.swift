@@ -42,6 +42,43 @@ final class ProcessRunnerTests: XCTestCase {
         XCTAssertEqual(collected.lines, ["a", "bb", "last"])
     }
 
+    func testLoggedCommandLineReproducesArgumentsInZsh() async throws {
+        // ログのコマンドをターミナルに貼って再現できること。実際に zsh に解釈させて、引数が元どおりに戻るかを見る。
+        let arguments = [
+            "-i", "/Volumes/Rec/[字][デ]ニュース 7時.ts", "a b", "$HOME", "it's", "!bang", "\"quoted\"", "*.ts",
+            "~user", "=ls", "tab\there", "line\nbreak", "", "bwdif=mode=send_frame:parity=auto", "-map", "0:1", "+genpts",
+        ]
+        let quoted = arguments.map(ProcessRunner.shellQuoted).joined(separator: " ")
+        let result = try await ProcessRunner.run(
+            executable: URL(fileURLWithPath: "/bin/zsh"),
+            arguments: ["-f", "-c", "printf '%s\\0' " + quoted]
+        )
+
+        XCTAssertTrue(result.isSuccess, result.stderrText)
+        let parsed = result.stdoutText.split(separator: "\0", omittingEmptySubsequences: false).dropLast().map(String.init)
+        XCTAssertEqual(parsed, arguments)
+    }
+
+    func testLongCommandIsKeptInFullInTheLogFile() throws {
+        // 統合ログは約 1KB で切り詰めるので、全文はファイルにも残す。
+        let marker = UUID().uuidString
+        let longPath = "/Volumes/TVRecord/" + String(repeating: "とても長い番組名", count: 60) + "\(marker).ts"
+        ProcessRunner.logCommand(executable: URL(fileURLWithPath: "/opt/homebrew/bin/ffprobe"), arguments: ["-i", longPath])
+
+        let url = try XCTUnwrap(CommandLogFile.url)
+        let log = try String(contentsOf: url, encoding: .utf8)
+        let line = try XCTUnwrap(log.split(separator: "\n").last { $0.contains(marker) })
+        XCTAssertGreaterThan(line.utf8.count, 1024)
+        XCTAssertEqual(String(line), ProcessRunner.commandLine(executable: URL(fileURLWithPath: "/opt/homebrew/bin/ffprobe"), arguments: ["-i", longPath]))
+    }
+
+    func testPlainArgumentsAreNotQuoted() {
+        XCTAssertEqual(
+            ProcessRunner.commandLine(executable: URL(fileURLWithPath: "/opt/homebrew/bin/ffmpeg"), arguments: ["-c:v", "libx265", "-crf", "21"]),
+            "/opt/homebrew/bin/ffmpeg -c:v libx265 -crf 21"
+        )
+    }
+
     func testStreamingDataDeliversRawBytes() async throws {
         let collected = LineBox()
         let result = try await ProcessRunner.runStreamingData(

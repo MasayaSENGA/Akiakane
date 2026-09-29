@@ -48,6 +48,48 @@ final class OutputPlanTests: XCTestCase {
         XCTAssertEqual(result, .write(URL(fileURLWithPath: "/Volumes/Card/DCIM/CLIP_h265.mp4")))
     }
 
+    func testOverwriteNeverReplacesAnotherQueuedInputOrThisBatchOutput() {
+        // 番組.ts と 番組.mp4（元の H.264）を接尾辞なしで変換すると、番組.ts の出力先が 番組.mp4 になる。
+        let ts = URL(fileURLWithPath: "/Volumes/Rec/番組.ts")
+        let otherInput = URL(fileURLWithPath: "/Volumes/Rec/番組.mp4")
+        var output = OutputSettings()
+        output.suffix = ""
+        output.existingFilePolicy = .overwrite
+        let result = makeOutputPlan(
+            for: ts, encode: EncodeSettings(), output: output,
+            fileExists: { $0.path == otherInput.path },
+            isReserved: { $0.path == otherInput.path }
+        )
+        XCTAssertEqual(result, .write(URL(fileURLWithPath: "/Volumes/Rec/番組 2.mp4")))
+    }
+
+    func testReservedNameIsAvoidedEvenBeforeTheFileExists() {
+        // 別のフォルダにある同名の録画を1つの保存先にまとめる。先の変換がまだ書き出し中でも、同じ名前にしない。
+        var output = OutputSettings()
+        output.destinationFolderPath = "/Volumes/Archive"
+        let running = URL(fileURLWithPath: "/Volumes/Archive/番組 第1話_h265.mp4")
+        let result = makeOutputPlan(
+            for: input, encode: EncodeSettings(), output: output,
+            fileExists: { _ in false },
+            isReserved: { $0.path == running.path }
+        )
+        XCTAssertEqual(result, .write(URL(fileURLWithPath: "/Volumes/Archive/番組 第1話_h265 2.mp4")))
+    }
+
+    func testSkipPolicyStillRenamesWhenOnlyReserved() {
+        // 別のフォルダにある同名の別の番組を1つの保存先にまとめる。スキップすると、その番組が変換されないまま終わる。
+        var output = OutputSettings()
+        output.destinationFolderPath = "/Volumes/Archive"
+        output.existingFilePolicy = .skip
+        let earlier = URL(fileURLWithPath: "/Volumes/Archive/番組 第1話_h265.mp4")
+        let result = makeOutputPlan(
+            for: input, encode: EncodeSettings(), output: output,
+            fileExists: { $0.path == earlier.path },
+            isReserved: { $0.path == earlier.path }
+        )
+        XCTAssertEqual(result, .write(URL(fileURLWithPath: "/Volumes/Archive/番組 第1話_h265 2.mp4")))
+    }
+
     func testRenamePolicyAppendsCounterUntilFree() {
         var output = OutputSettings()
         output.existingFilePolicy = .rename

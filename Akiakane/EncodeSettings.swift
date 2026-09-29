@@ -57,12 +57,21 @@ enum AudioMode: Codable, Sendable, Equatable {
     static let aacBitrateChoices = [128, 160, 192, 256, 320]
     static let defaultAACBitrate = 192
 
-    /// 選んだビットレートはステレオを基準にする。3ch 以上（5.1ch など）では2倍にして、
-    /// チャンネルあたりの割り当てが痩せないようにする（192 kbps → 384 kbps）。
+    /// 選んだビットレートはステレオを基準にする。チャンネルあたりの割り当てが痩せないよう、
+    /// 3〜6ch（5.1ch など）では2倍、7ch 以上（7.1ch など）では3倍にする（192 kbps → 384 / 576 kbps）。
     static func aacBitrate(base: Int, channels: Int?) -> Int {
         guard let channels, channels > 2 else { return base }
-        return base * 2
+        return channels > 6 ? base * 3 : base * 2
     }
+
+    /// 使うエンコーダ。Apple の aac_at は 7.1ch を扱えない（LFE を捨てて 7.0 にし、`-ac 8` を指定すると
+    /// チャンネルの割り当てが崩れる）ので、8ch だけは ffmpeg 内蔵の aac にする。
+    static func aacEncoder(preferred: String, channels: Int?) -> String {
+        channels == 8 ? "aac" : preferred
+    }
+
+    /// aac_at は 48 kHz を超える音声（96 / 192 kHz）を受け付けず、起動直後に失敗する。
+    static let maxAACSampleRate = 48_000
 }
 
 enum Container: String, Codable, CaseIterable, Sendable, Equatable {
@@ -85,6 +94,36 @@ enum Container: String, Codable, CaseIterable, Sendable, Equatable {
 
     /// QuickTime 系のコンテナか。`-tag:v hvc1` と `-movflags +faststart` が意味を持つのはこの2つ。
     var isQuickTimeFamily: Bool { self == .mp4 || self == .mov }
+
+    /// この形式に、再エンコードせずにコピーできる音声コーデックか。
+    ///
+    /// MP4 / MOV は、ffmpeg が書けて Apple 製アプリで再生できるものに絞る。wmav2・pcm_u8・adpcm_ima_wav
+    /// （古いデジカメの AVI）などは、MP4 に入れようとすると ffmpeg が起動直後に失敗する。
+    /// MP3 は MP4 に書けても、Apple 製アプリは音声トラックごと無視する（MOV なら再生できる）。
+    /// mp2 や DTS も、書けても Apple 製アプリでは鳴らない。
+    /// MKV はほぼ何でも格納できるが、Blu-ray / DVD / 放送の LPCM と QuickTime の IMA4 は ffmpeg が書けない。
+    func canCopyAudio(codecName: String) -> Bool {
+        switch self {
+        case .mkv: return !Self.mkvUnwritableAudio.contains(codecName)
+        case .mp4: return Self.mp4CopyableAudio.contains(codecName)
+        case .mov: return Self.movCopyableAudio.contains(codecName)
+        }
+    }
+
+    /// そのままはコピーできないが、無劣化の PCM に変換すれば入る音声のとき、変換先のコーデック。
+    /// Blu-ray（pcm_bluray）・DVD（pcm_dvd）・放送（s302m）の LPCM は、24 bit の PCM にすれば何も失わない。
+    /// MP4 の PCM は Apple 製アプリで再生できるとは限らないので、MP4 では AAC にする。
+    func losslessPCMCodec(for codecName: String) -> String? {
+        guard self != .mp4, Self.convertibleLPCM.contains(codecName) else { return nil }
+        return "pcm_s24le"
+    }
+
+    private static let mp4CopyableAudio: Set<String> = ["aac", "ac3", "eac3", "alac"]
+    private static let movCopyableAudio: Set<String> = mp4CopyableAudio.union([
+        "mp3", "pcm_s16le", "pcm_s16be", "pcm_s24le", "pcm_s24be", "pcm_s32le", "pcm_s32be", "pcm_f32le", "pcm_f32be",
+    ])
+    private static let convertibleLPCM: Set<String> = ["pcm_bluray", "pcm_dvd", "s302m"]
+    private static let mkvUnwritableAudio: Set<String> = convertibleLPCM.union(["adpcm_ima_qt"])
 }
 
 /// 変換設定。設定パネルから編集し、UserDefaults に保存する。
@@ -154,6 +193,7 @@ func makeOutputPlan(
     encode: EncodeSettings,
     output: OutputSettings,
     fileExists: (URL) -> Bool,
+    isReserved: (URL) -> Bool = { _ in false },
     sameFile: (URL, URL) -> Bool = refersToSameFile
 ) -> OutputPlan {
     let folder = output.destinationFolderURL ?? input.deletingLastPathComponent()
@@ -168,8 +208,20 @@ func makeOutputPlan(
         baseName += "_h265"
     }
 
+    func renamed() -> OutputPlan {
+        var counter = 2
+        while true {
+            let next = candidate("\(baseName) \(counter)")
+            if !fileExists(next), !isReserved(next) { return .write(next) }
+            counter += 1
+        }
+    }
+
     let first = candidate(baseName)
-    guard fileExists(first) else { return .write(first) }
+    guard fileExists(first) || isReserved(first) else { return .write(first) }
+    // キューのほかの項目の入力や、このバッチで書き出した出力と重なるときは、設定にかかわらず別名にする。
+    // 上書きすれば先の結果や元ファイルを消し、スキップすれば別の番組を変換しないまま終わってしまう。
+    if isReserved(first) { return renamed() }
 
     switch output.existingFilePolicy {
     case .overwrite:
@@ -177,12 +229,7 @@ func makeOutputPlan(
     case .skip:
         return .skip(existing: first)
     case .rename:
-        var counter = 2
-        while true {
-            let next = candidate("\(baseName) \(counter)")
-            if !fileExists(next) { return .write(next) }
-            counter += 1
-        }
+        return renamed()
     }
 }
 
@@ -280,6 +327,8 @@ enum AudioPlan: Equatable, Sendable {
     case copy
     /// AAC に再エンコードする。
     case encode(AACEncoding)
+    /// 無劣化の PCM に変換する（コピーできない LPCM を MOV / MKV に入れるとき）。
+    case pcm(codec: String)
 }
 
 struct AACEncoding: Equatable, Sendable {
@@ -289,10 +338,13 @@ struct AACEncoding: Equatable, Sendable {
     var bitrate: Int
     /// 出力のチャンネル数。nil なら ffmpeg に任せる（最初のフレームの構成になる）。
     var channels: Int?
+    /// 出力のサンプリング周波数。nil なら元のまま。
+    var sampleRate: Int? = nil
 
     var displayName: String {
-        guard let channels else { return "AAC（\(bitrate) kbps）" }
-        return "AAC \(AACFrameLayout.channelCountName(channels))（\(bitrate) kbps）"
+        let details = ["\(bitrate) kbps", sampleRate.map { "\($0 / 1000) kHz" }].compactMap { $0 }.joined(separator: "、")
+        guard let channels else { return "AAC（\(details)）" }
+        return "AAC \(AACFrameLayout.channelCountName(channels))（\(details)）"
     }
 }
 
@@ -319,9 +371,20 @@ func makeAudioPlan(
 ) -> AudioDecision {
     guard let audio = input.primaryAudio else { return AudioDecision(plan: .omit, note: nil) }
 
-    // 走査の結果があれば、全体での最大チャンネル数を明示する。
-    let targetChannels: Int? = layout.flatMap { layout in
+    // 出力のチャンネル数は必ず明示する。走査の結果があれば全体での最大チャンネル数、なければ ffprobe が見た数。
+    // `-ac` がないと、ffmpeg は最初のフレームの構成でエンコーダを作り（冒頭がステレオの録画では 5.1ch が落ちる）、
+    // aac_at はレイアウトの交渉で 7.1ch を 7.0 に、2.1ch をステレオに落とす。
+    let channels: Int? = layout.flatMap { layout in
         [layout.maxChannels, audio.channels].compactMap { $0 }.max()
+    } ?? audio.channels
+
+    func encoding(base: Int) -> AACEncoding {
+        AACEncoding(
+            encoder: AudioMode.aacEncoder(preferred: aacEncoder, channels: channels),
+            bitrate: AudioMode.aacBitrate(base: base, channels: channels),
+            channels: channels,
+            sampleRate: audio.sampleRate.flatMap { $0 > AudioMode.maxAACSampleRate ? AudioMode.maxAACSampleRate : nil }
+        )
     }
 
     switch settings.audioMode {
@@ -329,20 +392,27 @@ func makeAudioPlan(
         return AudioDecision(plan: .omit, note: nil)
 
     case .copy:
+        guard settings.container.canCopyAudio(codecName: audio.codecName) else {
+            // 出力の形式に入らない音声は、コピーすると ffmpeg が失敗するか、Apple 製アプリで鳴らない。
+            // そのファイルだけ、LPCM なら無劣化の PCM に、それ以外は AAC に変換する。
+            if let pcm = settings.container.losslessPCMCodec(for: audio.codecName) {
+                return AudioDecision(
+                    plan: .pcm(codec: pcm),
+                    note: "音声（\(audio.codecName)）は \(settings.container.displayName) にそのまま入れられないため、無劣化の PCM（\(pcm)）に変換する。"
+                )
+            }
+            let fallback = encoding(base: AudioMode.defaultAACBitrate)
+            return AudioDecision(
+                plan: .encode(fallback),
+                note: "音声（\(audio.codecName)）は \(settings.container.displayName) にそのまま入れられないため、\(fallback.displayName)に変換する。"
+            )
+        }
         guard let layout, layout.isUnsafeToCopy else { return AudioDecision(plan: .copy, note: nil) }
-        let encoding = AACEncoding(
-            encoder: aacEncoder,
-            bitrate: AudioMode.aacBitrate(base: AudioMode.defaultAACBitrate, channels: targetChannels),
-            channels: targetChannels
-        )
-        return AudioDecision(plan: .encode(encoding), note: copyFallbackNote(layout: layout, encoding: encoding))
+        let fallback = encoding(base: AudioMode.defaultAACBitrate)
+        return AudioDecision(plan: .encode(fallback), note: copyFallbackNote(layout: layout, encoding: fallback))
 
     case .aac(let bitrate):
-        let encoding = AACEncoding(
-            encoder: aacEncoder,
-            bitrate: AudioMode.aacBitrate(base: bitrate, channels: targetChannels ?? audio.channels),
-            channels: targetChannels
-        )
+        let encoding = encoding(base: bitrate)
         var note: String?
         if let layout, layout.hasLayoutChange {
             note = layoutChangeDescription(layout)
@@ -427,10 +497,18 @@ func makeArguments(input: MediaInfo, output: URL, settings: EncodeSettings, audi
         if needsAACBitstreamFilter(input: input, settings: settings, audio: audio) {
             arguments += ["-bsf:a", "aac_adtstoasc"]
         }
+        // TS の AC-3 を MOV にコピーすると、ffmpeg はタグを "AC-3" にし、Apple 製アプリで鳴らない。
+        // MP4 と同じ "ac-3" にすれば再生できる（E-AC-3 はそのままで再生できる）。
+        if audio == .copy, settings.container == .mov, input.primaryAudio?.codecName == "ac3" {
+            arguments += ["-tag:a", "ac-3"]
+        }
     }
 
-    if hasVideo, settings.videoCodec != .copy, settings.container.isQuickTimeFamily {
+    if hasVideo, settings.container.isQuickTimeFamily,
+       settings.videoCodec != .copy || input.primaryVideo?.codecName == "hevc" {
         // これがないと QuickTime や Apple 系デバイスで HEVC が再生できない。
+        // HEVC の素材を映像コピーで詰め替える場合も、ffmpeg は既定で hev1 を書くので明示する。
+        // H.264 のコピーに付けると失敗するので、HEVC のときだけにする。
         arguments += ["-tag:v", "hvc1"]
     }
 
@@ -464,7 +542,9 @@ private func deinterlaceFilter(input: MediaInfo, settings: EncodeSettings) -> St
     case .off:
         return nil
     case .force:
-        return "bwdif=mode=send_frame:parity=auto:deint=interlaced"
+        // deint=interlaced はインターレースとマークされたフレームしか処理しない。
+        // マークのないインターレース素材こそ「常に解除する」を選ぶ場面なので、全フレームを処理させる。
+        return "bwdif=mode=send_frame:parity=auto:deint=all"
     case .auto:
         switch input.deinterlaceAdvice {
         case .notNeeded:
@@ -492,16 +572,22 @@ private func audioArguments(_ audio: AudioPlan) -> [String] {
         if let channels = encoding.channels {
             arguments += ["-ac", String(channels)]
         }
+        if let sampleRate = encoding.sampleRate {
+            arguments += ["-ar", String(sampleRate)]
+        }
         return arguments
+    case .pcm(let codec):
+        return ["-c:a", codec]
     case .omit:
         return []
     }
 }
 
-/// .ts から MP4 / MOV へ音声をコピーする場合に必要なビットストリームフィルタか。
-/// 近年の ffmpeg は自動で付けるが、明示しておく。
+/// .ts の AAC を MP4 / MOV へコピーする場合に必要なビットストリームフィルタか。
+/// 近年の ffmpeg は自動で付けるが、明示しておく。AAC 以外（AVCHD の AC-3 など）に付けると、
+/// ffmpeg が起動直後に失敗する。
 private func needsAACBitstreamFilter(input: MediaInfo, settings: EncodeSettings, audio: AudioPlan) -> Bool {
     guard audio == .copy else { return false }
     guard settings.container.isQuickTimeFamily else { return false }
-    return input.isMPEGTransportStream
+    return input.isMPEGTransportStream && input.primaryAudio?.codecName == "aac"
 }

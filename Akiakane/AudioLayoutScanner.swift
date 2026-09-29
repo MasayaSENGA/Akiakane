@@ -1,4 +1,5 @@
 import Foundation
+import os
 
 // MARK: - 音声構成の判定結果
 
@@ -404,6 +405,9 @@ enum AudioLayoutScanError: LocalizedError {
 /// 所要時間はディスクの読み出し速度で決まる。
 struct AudioLayoutScanner {
 
+    /// 走査の結果と、音声の扱いを決めた理由を残すロガー。
+    nonisolated static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Akiakane", category: "audio")
+
     /// 実行ファイルを明示したいときに指定する。nil なら FFToolLocator が探す。
     var executableURL: URL?
 
@@ -435,10 +439,6 @@ struct AudioLayoutScanner {
         let executable = try executableURL ?? FFToolLocator.require(.ffmpeg)
         let arguments = Self.arguments(for: input)
 
-        #if DEBUG
-        print("[ffmpeg] " + ProcessRunner.commandLine(executable: executable, arguments: arguments))
-        #endif
-
         let parser = ADTSLayoutParser()
         let result = try await ProcessRunner.runStreamingData(
             executable: executable,
@@ -468,9 +468,7 @@ struct AudioLayoutScanner {
             throw AudioLayoutScanError.noFrames(fileName: input.fileName)
         }
 
-        #if DEBUG
-        print("[audio] \(input.fileName): \(report.frameCount) フレーム、構成 \(report.segments.map(\.displayName).joined(separator: " → "))")
-        #endif
+        Self.logger.notice("\(input.fileName, privacy: .public): \(report.frameCount) フレーム、構成 \(report.segments.map(\.displayName).joined(separator: " → "), privacy: .public)")
 
         return report
     }

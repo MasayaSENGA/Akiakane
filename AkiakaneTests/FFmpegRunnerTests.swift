@@ -23,6 +23,7 @@ final class FFmpegRunnerTests: XCTestCase {
         let body = """
         #!/bin/sh
         for last; do :; done
+        printf '%s\\n' "$last" >> "\(folder.path)/received-outputs.txt"
         \(writesOutput ? "printf 'converted' > \"$last\"" : ":")
         printf '%s' '\(stderr)' >&2
         exit \(exitCode)
@@ -30,6 +31,17 @@ final class FFmpegRunnerTests: XCTestCase {
         try body.write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
         return script
+    }
+
+    /// フォルダに残っている書きかけのファイル。
+    private func partialFiles() throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: folder.path).filter { $0.hasSuffix(".partial") }
+    }
+
+    /// 偽の ffmpeg が受け取った出力先（最後の引数）。
+    private func receivedOutputs() throws -> [String] {
+        try String(contentsOf: folder.appendingPathComponent("received-outputs.txt"), encoding: .utf8)
+            .split(separator: "\n").map(String.init)
     }
 
     private func encode(input: URL, output: URL, executable: URL) async throws {
@@ -46,7 +58,26 @@ final class FFmpegRunnerTests: XCTestCase {
         try await encode(input: input, output: output, executable: fakeFFmpeg())
 
         XCTAssertEqual(try String(contentsOf: output, encoding: .utf8), "converted")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path + ".partial"))
+        XCTAssertEqual(try partialFiles(), [], "書きかけのファイルを残さない")
+    }
+
+    func testPartialNameIsUniquePerRun() async throws {
+        // 取り残された ffmpeg と同じ書きかけのファイルに、次の変換が書き込まないようにする。
+        let input = folder.appendingPathComponent("rec.ts")
+        try Data("original".utf8).write(to: input)
+        let output = folder.appendingPathComponent("rec_h265.mp4")
+        let executable = try fakeFFmpeg()
+
+        try await encode(input: input, output: output, executable: executable)
+        try FileManager.default.removeItem(at: output)
+        try await encode(input: input, output: output, executable: executable)
+
+        let received = try receivedOutputs().map { URL(fileURLWithPath: $0).lastPathComponent }
+        XCTAssertEqual(received.count, 2)
+        XCTAssertNotEqual(received[0], received[1])
+        for name in received {
+            XCTAssertTrue(name.hasPrefix("rec_h265.mp4.") && name.hasSuffix(".partial"), name)
+        }
     }
 
     func testOutputThatIsTheInputIsRefusedAndInputIsKept() async throws {
@@ -80,7 +111,7 @@ final class FFmpegRunnerTests: XCTestCase {
             guard case .inputReadFailed = error else { return XCTFail("別のエラー: \(error)") }
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: output.path), "途中までの出力を正式な名前にしない")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: output.path + ".partial"))
+        XCTAssertEqual(try partialFiles(), [], "書きかけのファイルを残さない")
     }
 
     func testReadErrorKeepsExistingOutputWhenOverwriting() async throws {

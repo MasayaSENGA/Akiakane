@@ -197,9 +197,6 @@ struct FFmpegRunner {
         if let cached = Self.aacEncoderCache[executable.path] { return cached }
 
         let arguments = ["-hide_banner", "-h", "encoder=aac_at"]
-        #if DEBUG
-        print("[ffmpeg] " + ProcessRunner.commandLine(executable: executable, arguments: arguments))
-        #endif
         let result = try await ProcessRunner.run(executable: executable, arguments: arguments)
 
         // 存在しないエンコーダを問い合わせても終了コードは 0 なので、出力の見出しで判定する。
@@ -226,22 +223,25 @@ struct FFmpegRunner {
         guard !refersToSameFile(output, input.url) else {
             throw FFmpegRunnerError.outputIsInput(fileName: input.fileName)
         }
-        let partialOutput = output.appendingPathExtension("partial")
+        // 書きかけの名前は実行ごとに変える。アプリが異常終了して ffmpeg が取り残されたまま同じファイルを
+        // 変換し直すと、固定の名前では2本の ffmpeg が同じファイルに書き込み、壊れた出力が「完了」になった。
+        let runToken = UUID().uuidString.prefix(8).lowercased()
+        let partialOutput = output.appendingPathExtension("\(runToken).partial")
         let arguments = makeArguments(input: input, output: partialOutput, settings: settings, audio: audio)
-
-        #if DEBUG
-        print("[ffmpeg] " + ProcessRunner.commandLine(executable: executable, arguments: arguments))
-        #endif
 
         let accumulator = FFmpegProgressAccumulator(
             duration: input.duration,
             hasReliableDuration: input.hasReliableDuration
         )
 
+        // 異常終了に備えて、動いている ffmpeg を記録しておく（OrphanedFFmpeg）。
+        defer { OrphanedFFmpeg.clear() }
+
         do {
             let result = try await ProcessRunner.runStreaming(
                 executable: executable,
-                arguments: arguments
+                arguments: arguments,
+                onLaunch: { pid in OrphanedFFmpeg.record(pid: pid, partial: partialOutput) }
             ) { line in
                 if let progress = accumulator.consume(line) {
                     onProgress(progress)

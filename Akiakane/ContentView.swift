@@ -11,6 +11,13 @@ struct ContentView: View {
     @State private var isDropTargeted = false
     @State private var isImporterPresented = false
     @State private var isInspectorPresented = true
+    /// 変換中のファイルを含む削除の確認待ち。
+    @State private var pendingRemoval: PendingRemoval?
+
+    private enum PendingRemoval: Equatable {
+        case item(MediaInfo.ID)
+        case all
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -52,8 +59,47 @@ struct ContentView: View {
         }
         .onDeleteCommand {
             guard let selection else { return }
-            queue.remove(selection)
-            self.selection = nil
+            requestRemoval(of: selection)
+        }
+        .confirmationDialog(
+            "変換中のファイルが含まれている",
+            isPresented: Binding(get: { pendingRemoval != nil }, set: { if !$0 { pendingRemoval = nil } }),
+            presenting: pendingRemoval
+        ) { removal in
+            Button("変換を止めて外す", role: .destructive) { performRemoval(removal) }
+            Button("キャンセル", role: .cancel) {}
+        } message: { _ in
+            Text("続けると変換を止め、書きかけの出力を削除する。元のファイルは消えない。")
+        }
+    }
+
+    // MARK: 削除
+
+    /// 変換中のファイルは、確認してから外す。数時間かかる変換を Delete キーの押し間違いで失わないようにする。
+    private func requestRemoval(of id: MediaInfo.ID) {
+        if queue.item(for: id)?.status.isActive == true {
+            pendingRemoval = .item(id)
+        } else {
+            performRemoval(.item(id))
+        }
+    }
+
+    private func requestRemoveAll() {
+        if queue.items.contains(where: { $0.status.isActive }) {
+            pendingRemoval = .all
+        } else {
+            performRemoval(.all)
+        }
+    }
+
+    private func performRemoval(_ removal: PendingRemoval) {
+        switch removal {
+        case .item(let id):
+            queue.remove(id)
+            if selection == id { selection = nil }
+        case .all:
+            queue.removeAll()
+            clearSelectionIfMissing()
         }
     }
 
@@ -91,8 +137,9 @@ struct ContentView: View {
             Menu {
                 Button("完了したものを消去") { queue.removeSettled(); clearSelectionIfMissing() }
                     .disabled(!queue.hasSettledItems)
-                Button("すべて消去") { queue.removeAll(); clearSelectionIfMissing() }
-                    .disabled(queue.items.isEmpty)
+                Button("すべて消去") { requestRemoveAll() }
+                    // 解析だけが進んでいる間（大きなフォルダで ffprobe が失敗し続けるなど）も、止められるようにする。
+                    .disabled(queue.items.isEmpty && !queue.isProbing)
             } label: {
                 Label("消去", systemImage: "trash")
             }
@@ -147,10 +194,7 @@ struct ContentView: View {
         }
         Divider()
         Button("元のファイルを Finder で表示") { NSWorkspace.shared.activateFileViewerSelecting([item.info.url]) }
-        Button("リストから外す") {
-            queue.remove(item.id)
-            if selection == item.id { selection = nil }
-        }
+        Button("リストから外す") { requestRemoval(of: item.id) }
     }
 
     private var queueSummary: some View {
@@ -234,16 +278,29 @@ struct ContentView: View {
         .background(.regularMaterial)
     }
 
+    private var errorMessageList: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(Array(queue.errorMessages.enumerated()), id: \.offset) { _, message in
+                Text(message)
+                    .font(.caption)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
     private var errorBanner: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "xmark.octagon.fill")
                 .foregroundStyle(.red)
-            VStack(alignment: .leading, spacing: 4) {
-                ForEach(Array(queue.errorMessages.enumerated()), id: \.offset) { _, message in
-                    Text(message)
-                        .font(.caption)
-                        .textSelection(.enabled)
+            // 件数が多いと、閉じるボタンがウインドウの外に押し出される。数件を超えたらスクロールさせる。
+            if queue.errorMessages.count > 3 {
+                ScrollView {
+                    errorMessageList
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .frame(height: 120)
+            } else {
+                errorMessageList
             }
             Spacer()
             Button("閉じる") { queue.dismissErrors() }
@@ -258,6 +315,8 @@ struct ContentView: View {
         for ext in ["ts", "m2ts", "mts", "mkv"] {
             if let type = UTType(filenameExtension: ext) { types.append(type) }
         }
+        // AVCHD / BDMV のフォルダはパッケージ扱いで、.folder に当てはまらない。
+        if let collection = UTType("public.audiovisual-content-collection") { types.append(collection) }
         return types
     }()
 }

@@ -79,7 +79,7 @@ final class EncodeArgumentsTests: XCTestCase {
         settings.deinterlace = .force
         let args = makeArguments(input: info, output: output, settings: settings)
 
-        XCTAssertTrue(args.containsConsecutive(["-vf", "bwdif=mode=send_frame:parity=auto:deint=interlaced"]))
+        XCTAssertTrue(args.containsConsecutive(["-vf", "bwdif=mode=send_frame:parity=auto:deint=all"]))
     }
 
     // MARK: - コンテナ別の違い
@@ -93,6 +93,15 @@ final class EncodeArgumentsTests: XCTestCase {
         XCTAssertFalse(args.contains("-tag:v"))
         XCTAssertFalse(args.contains("-movflags"))
         XCTAssertFalse(args.contains("-bsf:a"), "MKV では aac_adtstoasc は不要")
+    }
+
+    func testAC3FromTransportStreamIsCopiedWithoutAACBitstreamFilter() {
+        // AVCHD の .MTS / .m2ts は AC-3。aac_adtstoasc を付けると ffmpeg が起動直後に失敗する。
+        let info = TestFixtures.mediaInfo(url: URL(fileURLWithPath: "/tmp/00000.MTS"), audioCodec: "ac3")
+        let args = makeArguments(input: info, output: output, settings: EncodeSettings())
+
+        XCTAssertTrue(args.containsConsecutive(["-c:a", "copy"]))
+        XCTAssertFalse(args.contains("-bsf:a"))
     }
 
     func testNonTSSourceDoesNotGetBitstreamFilterEvenForMP4() {
@@ -158,6 +167,7 @@ final class EncodeArgumentsTests: XCTestCase {
 final class AudioPlanTests: XCTestCase {
 
     private let tsInput = URL(fileURLWithPath: "/tmp/rec.ts")
+    private let output = URL(fileURLWithPath: "/tmp/out.mp4.partial")
 
     private func layout(_ channels: Int?, dualMono: Bool = false) -> AACFrameLayout {
         AACFrameLayout(
@@ -251,14 +261,14 @@ final class AudioPlanTests: XCTestCase {
         XCTAssertNotNil(decision.note)
     }
 
-    func testAACModeWithoutScanUsesInputChannelsForBitrateOnly() {
-        // MP4 などの 5.1ch 入力。構成は1つなので -ac は付けず、ビットレートだけ2倍にする。
+    func testAACModeWithoutScanKeepsInputChannelsAndDoublesBitrate() {
+        // MP4 などの 5.1ch 入力。チャンネル数は ffprobe の値で明示し、ビットレートを2倍にする。
         let info = TestFixtures.mediaInfo(url: URL(fileURLWithPath: "/tmp/movie.mp4"), audioChannels: 6)
         var settings = EncodeSettings()
         settings.audioMode = .aac(bitrate: 160)
         let decision = makeAudioPlan(input: info, settings: settings, layout: nil, aacEncoder: "aac")
 
-        XCTAssertEqual(decision.plan, .encode(AACEncoding(encoder: "aac", bitrate: 320, channels: nil)))
+        XCTAssertEqual(decision.plan, .encode(AACEncoding(encoder: "aac", bitrate: 320, channels: 6)))
         XCTAssertNil(decision.note)
     }
 
@@ -269,6 +279,86 @@ final class AudioPlanTests: XCTestCase {
         let decision = makeAudioPlan(input: info, settings: settings, layout: report([layout(2)]), aacEncoder: "aac")
 
         XCTAssertEqual(decision.plan, .encode(AACEncoding(encoder: "aac", bitrate: 256, channels: 2)))
+    }
+
+    func testAudioThatMP4CannotHoldIsConvertedToAAC() {
+        // WMV の wmav2 や、古いデジカメの AVI の pcm_u8 / IMA ADPCM は、MP4 にコピーすると ffmpeg が失敗する。
+        // MP3 は MP4 に書けても、Apple 製アプリが音声トラックごと無視する。
+        for codec in ["wmav2", "pcm_u8", "adpcm_ima_wav", "mp2", "pcm_s16le", "mp3"] {
+            let info = TestFixtures.mediaInfo(url: URL(fileURLWithPath: "/tmp/clip.avi"), audioCodec: codec)
+            let decision = makeAudioPlan(input: info, settings: EncodeSettings(), layout: nil, aacEncoder: "aac_at")
+
+            XCTAssertEqual(decision.plan, .encode(AACEncoding(encoder: "aac_at", bitrate: 192, channels: 2)), codec)
+            XCTAssertTrue(decision.note?.contains(codec) ?? false, decision.note ?? "")
+        }
+    }
+
+    func testAudioThatTheContainerCanHoldIsCopied() {
+        let cases: [(String, Container)] = [
+            ("aac", .mp4), ("ac3", .mp4), ("eac3", .mp4), ("alac", .mp4), ("mp3", .mov), ("pcm_s16le", .mov),
+            ("wmav2", .mkv), ("pcm_u8", .mkv), ("flac", .mkv),
+        ]
+        for (codec, container) in cases {
+            let info = TestFixtures.mediaInfo(url: URL(fileURLWithPath: "/tmp/clip.avi"), audioCodec: codec)
+            var settings = EncodeSettings()
+            settings.container = container
+            XCTAssertEqual(makeAudioPlan(input: info, settings: settings, layout: nil, aacEncoder: "aac").plan, .copy, "\(codec) → \(container)")
+        }
+    }
+
+    func testIncompatibleSurroundAudioKeepsItsChannelsAndDoublesBitrate() {
+        // Blu-ray の LPCM 5.1ch を MP4 にする。チャンネル数を明示し、ビットレートを5.1ch 用にする。
+        let info = TestFixtures.mediaInfo(url: URL(fileURLWithPath: "/tmp/00001.m2ts"), audioCodec: "pcm_bluray", audioChannels: 6)
+        let decision = makeAudioPlan(input: info, settings: EncodeSettings(), layout: nil, aacEncoder: "aac")
+
+        XCTAssertEqual(decision.plan, .encode(AACEncoding(encoder: "aac", bitrate: 384, channels: 6)))
+    }
+
+    func testLPCMIntoMKVOrMOVBecomesLosslessPCM() {
+        // Blu-ray / DVD / 放送の LPCM は MKV にコピーできず、MOV にもそのままは入らない。24 bit の PCM にすれば無劣化で入る。
+        for codec in ["pcm_bluray", "pcm_dvd", "s302m"] {
+            for container in [Container.mkv, .mov] {
+                let info = TestFixtures.mediaInfo(url: URL(fileURLWithPath: "/tmp/00001.m2ts"), audioCodec: codec, audioChannels: 6)
+                var settings = EncodeSettings()
+                settings.container = container
+                let decision = makeAudioPlan(input: info, settings: settings, layout: nil, aacEncoder: "aac_at")
+                XCTAssertEqual(decision.plan, .pcm(codec: "pcm_s24le"), "\(codec) → \(container)")
+            }
+        }
+        let info = TestFixtures.mediaInfo(url: URL(fileURLWithPath: "/tmp/00001.m2ts"), audioCodec: "pcm_bluray")
+        var mkv = EncodeSettings()
+        mkv.container = .mkv
+        let args = makeArguments(input: info, output: output, settings: mkv, audio: makeAudioPlan(input: info, settings: mkv, layout: nil, aacEncoder: "aac").plan)
+        XCTAssertTrue(args.containsConsecutive(["-c:a", "pcm_s24le"]))
+        XCTAssertFalse(args.contains("-af"))
+    }
+
+    func testSevenPointOneUsesBuiltInEncoderAndKeepsEightChannels() {
+        // aac_at は 7.1ch の LFE を捨てて 7.0 にするので、8ch だけは内蔵の aac を使う。
+        let info = TestFixtures.mediaInfo(url: URL(fileURLWithPath: "/tmp/movie.mkv"), audioCodec: "flac", audioChannels: 8)
+        let decision = makeAudioPlan(input: info, settings: EncodeSettings(), layout: nil, aacEncoder: "aac_at")
+
+        XCTAssertEqual(decision.plan, .encode(AACEncoding(encoder: "aac", bitrate: 576, channels: 8)))
+    }
+
+    func testHighSampleRateIsConvertedTo48kHz() {
+        // aac_at は 96 kHz を受け付けず、起動直後に失敗する。
+        let info = TestFixtures.mediaInfo(url: URL(fileURLWithPath: "/tmp/clip.mov"), audioCodec: "pcm_s24le", audioSampleRate: 96_000)
+        let decision = makeAudioPlan(input: info, settings: EncodeSettings(), layout: nil, aacEncoder: "aac_at")
+
+        XCTAssertEqual(decision.plan, .encode(AACEncoding(encoder: "aac_at", bitrate: 192, channels: 2, sampleRate: 48_000)))
+        let args = makeArguments(input: info, output: output, settings: EncodeSettings(), audio: decision.plan)
+        XCTAssertTrue(args.containsConsecutive(["-ar", "48000"]))
+        XCTAssertTrue(decision.note?.contains("48 kHz") ?? false, decision.note ?? "")
+    }
+
+    func testAC3CopiedIntoMOVGetsAppleTag() {
+        // TS の AC-3 を MOV にコピーすると、ffmpeg はタグを "AC-3" にし、Apple 製アプリで鳴らない。
+        let info = TestFixtures.mediaInfo(url: URL(fileURLWithPath: "/tmp/00000.MTS"), audioCodec: "ac3")
+        var mov = EncodeSettings()
+        mov.container = .mov
+        XCTAssertTrue(makeArguments(input: info, output: output, settings: mov).containsConsecutive(["-tag:a", "ac-3"]))
+        XCTAssertFalse(makeArguments(input: info, output: output, settings: EncodeSettings()).contains("-tag:a"), "MP4 では ffmpeg が ac-3 を付ける")
     }
 
     func testNoneAndMissingAudioAreOmitted() {
@@ -339,6 +429,17 @@ final class VideoToolboxArgumentsTests: XCTestCase {
         XCTAssertEqual(args[qualityIndex + 1], "70")
         XCTAssertFalse(args.contains("-crf"), "VideoToolbox に -crf は渡さない")
         XCTAssertFalse(args.contains("-preset"), "VideoToolbox に x265 のプリセットは渡さない")
+        guard let tagIndex = args.firstIndex(of: "-tag:v") else { return XCTFail("-tag:v がない") }
+        XCTAssertEqual(args[tagIndex + 1], "hvc1")
+    }
+
+    func testCopyingHEVCIntoMP4GetsHvc1Tag() {
+        // HEVC の素材を詰め替えると、ffmpeg は既定で hev1 を書き、QuickTime で再生できない。
+        let info = TestFixtures.mediaInfo(url: URL(fileURLWithPath: "/tmp/movie.mkv"), videoCodec: "hevc")
+        var settings = EncodeSettings()
+        settings.videoCodec = .copy
+        let args = makeArguments(input: info, output: URL(fileURLWithPath: "/tmp/out.mp4.partial"), settings: settings)
+
         guard let tagIndex = args.firstIndex(of: "-tag:v") else { return XCTFail("-tag:v がない") }
         XCTAssertEqual(args[tagIndex + 1], "hvc1")
     }
