@@ -42,7 +42,7 @@ TARGETS → General → Minimum Deployments → macOS **14.0**
 
 ## 5. ソースファイルの追加
 
-Xcode が自動生成した `ContentView.swift` と `AkiakaneApp.swift` を、このフォルダの同名ファイルで置き換えます。残りは新規追加してください。
+Xcode が自動生成した `ContentView.swift` と `AkiakaneApp.swift` を、リポジトリの `Akiakane/` フォルダにある同名ファイルで置き換えます。残りも `Akiakane/` から追加してください。アプリのソースは、Xcode が作る `Akiakane/` フォルダ（同期フォルダ）の中に置き、リポジトリ直下には置きません。直下に置くと、ドキュメントやビルド生成物までアプリに取り込まれます。
 
 | ファイル | 役割 |
 |---|---|

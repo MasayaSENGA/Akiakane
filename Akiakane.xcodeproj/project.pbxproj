@@ -22,25 +22,6 @@
 		CEA7F63D304EFAB600442EAA /* Akiakane.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Akiakane.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
-/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		64ED03F2C4B3E27158446572 /* Exceptions for "Akiakane" folder in "Akiakane" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				AkiakaneTests/AudioLayoutScannerTests.swift,
-				AkiakaneTests/EncodeArgumentsTests.swift,
-				AkiakaneTests/FFmpegProgressParserTests.swift,
-				AkiakaneTests/FFmpegRunnerTests.swift,
-				AkiakaneTests/MediaInfoTests.swift,
-				AkiakaneTests/OutputPlanTests.swift,
-				AkiakaneTests/ProcessRunnerTests.swift,
-				AkiakaneTests/SettingsPersistenceTests.swift,
-				AkiakaneTests/TestFixtures.swift,
-				Scripts/DrawIcon.swift,
-			);
-			target = CEA7F63C304EFAB600442EAA /* Akiakane */;
-		};
-/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
-
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		0BF9A5D58E3A38077479D232 /* AkiakaneTests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
@@ -49,10 +30,7 @@
 		};
 		CEA7F63F304EFAB600442EAA /* Akiakane */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				64ED03F2C4B3E27158446572 /* Exceptions for "Akiakane" folder in "Akiakane" target */,
-			);
-			name = Akiakane;
+			path = Akiakane;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */

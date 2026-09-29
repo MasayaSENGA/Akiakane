@@ -131,7 +131,9 @@ ffmpeg -f lavfi -i testsrc2=size=1440x1080:rate=30000/1001 -f lavfi -i sine=freq
 
 ## ファイル構成
 
-| ファイル | 役割 |
+アプリのソースと `Assets.xcassets` は `Akiakane/`、テストは `AkiakaneTests/` にある。どちらも Xcode の同期フォルダで、フォルダに置いたファイルがそのままターゲットに入る。リポジトリ直下のドキュメントや `build/` はアプリに含まれない。
+
+| ファイル（`Akiakane/` 内） | 役割 |
 |---|---|
 | `AkiakaneApp.swift` | エントリポイント。終了時に変換中の ffmpeg を止める |
 | `ContentView.swift` | メイン画面。キュー一覧とツールバー |

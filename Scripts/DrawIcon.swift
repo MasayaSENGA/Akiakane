@@ -3,10 +3,10 @@ import AppKit
 // Akiakane（秋茜 = アキアカネ、赤とんぼ）のアイコンを描くスクリプト。
 // 秋の夕空を思わせる朱色のグラデーションに、白いとんぼのシルエットを置く。
 //
-// アプリのターゲットには含めない（project.pbxproj の membershipExceptions で除外）。
+// アプリのターゲットには含めない（アプリの同期フォルダは Akiakane/ なので、Scripts/ は入らない）。
 // 使い方:
 //   swiftc -O -o /tmp/DrawIcon Scripts/DrawIcon.swift && /tmp/DrawIcon /tmp/icon_1024.png
-//   その後 sips で各サイズに縮小して Assets.xcassets/AppIcon.appiconset/ に置く。
+//   その後 sips で各サイズに縮小して Akiakane/Assets.xcassets/AppIcon.appiconset/ に置く。
 let size: CGFloat = 1024
 let outputPath = CommandLine.arguments[1]
 

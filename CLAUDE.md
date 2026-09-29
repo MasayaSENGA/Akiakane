@@ -37,7 +37,9 @@ Xcode を開いて手で確認してもらうのは最後の実行確認だけ�
 
 ## 現在のファイル構成
 
-| ファイル | 役割 | 状態 |
+アプリのソースと `Assets.xcassets` は `Akiakane/`、テストは `AkiakaneTests/`、アイコンを描くスクリプトは `Scripts/` にある。
+
+| ファイル（`Akiakane/` 内） | 役割 | 状態 |
 |---|---|---|
 | `AkiakaneApp.swift` | エントリポイント。`AppDelegate` がキューを所有し、終了時に ffmpeg を止める | 完成 |
 | `ContentView.swift` | メイン画面。キュー一覧（サイドバー）・ツールバー・設定インスペクタの配置 | 完成 |
@@ -64,14 +66,16 @@ Xcode を開いて手で確認してもらうのは最後の実行確認だけ�
 xcodebuild -project Akiakane.xcodeproj -scheme Akiakane -configuration Debug test -destination 'platform=macOS'
 ```
 
-ソースはルート直下の同期フォルダで管理している。`AkiakaneTests/` に新しいテストファイルを足したら、
-`project.pbxproj` の `membershipExceptions`（アプリターゲットからの除外リスト）にも追加しないと、
-アプリ本体のビルドで `XCTest` が解決できずに失敗する。
+`Akiakane/` と `AkiakaneTests/` は Xcode の同期フォルダ（`PBXFileSystemSynchronizedRootGroup`）で、置いたファイルがそのまま各ターゲットに入る。
+新しいソースやテストを足すときに `project.pbxproj` を編集する必要はない。アプリのソースをリポジトリ直下に置かないこと（下の設計上の決定を参照）。
 
 ## 設計上の決定と、その理由
 
 書き換える前に理由を確認すること。いずれも実際に踏んだ問題への対処である。
 
+- **アプリの同期フォルダは `Akiakane/` で、リポジトリ直下ではない。**
+  以前はリポジトリ直下全体をアプリの同期フォルダにしていたため、README の手順（`-derivedDataPath build`）で作られた `build/` を
+  次のビルドが取り込み、「Multiple commands produce」で以後のビルドがすべて失敗した。README・CLAUDE.md・gitignore 対象のメモまで .app に同梱されていた。
 - **`ProcessRunner` は stdout / stderr / プロセス終了の3つを `DispatchGroup` で待ち合わせる。**
   パイプは 64KB 程度で埋まる。待機中も読み続けないと、出力の多いプロセスがブロックして終了しない。
 - **`FFProbeReport` は `profile` フィールドを decode していない。**
